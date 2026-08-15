@@ -62,11 +62,8 @@ def get_database():
         db = {
             "users": {},      
             "messages": {},   
-            "groups": {},
-            "sessions": {}
+            "groups": {}
         }
-        
-    if "sessions" not in db: db["sessions"] = {}
         
     for u, data in db["users"].items():
         if isinstance(data, str): 
@@ -141,12 +138,6 @@ if "logged_in" not in st.session_state:
     st.session_state.editing_msg = None
     st.session_state.last_chat_id = None
 
-if not st.session_state.logged_in:
-    url_token = st.query_params.get("session")
-    if url_token and url_token in db.get("sessions", {}):
-        st.session_state.logged_in = True
-        st.session_state.username = db["sessions"][url_token]
-
 if st.session_state.current_chat_id != st.session_state.last_chat_id:
     st.session_state.replying_to = None
     st.session_state.editing_msg = None
@@ -178,10 +169,6 @@ if not st.session_state.logged_in:
             l_pass = st.text_input("Пароль", type="password", key="l_pass")
             if st.button("Войти", type="primary", use_container_width=True):
                 if l_user in db["users"] and db["users"][l_user]["password"] == make_hash(l_pass):
-                    session_token = uuid.uuid4().hex
-                    db["sessions"][session_token] = l_user
-                    st.query_params["session"] = session_token
-                    save_db()
                     st.session_state.logged_in = True
                     st.session_state.username = l_user
                     st.rerun()
@@ -211,7 +198,10 @@ else:
         prof_col1, prof_col2 = st.columns([1, 3], vertical_alignment="center")
         with prof_col1:
             if user_info.get("avatar"):
-                st.image(io.BytesIO(base64.b64decode(user_info["avatar"])), use_column_width=True)
+                try:
+                    st.image(io.BytesIO(base64.b64decode(user_info["avatar"])), use_container_width=True)
+                except Exception:
+                    st.markdown("<h1 style='margin:0; padding:0; text-align:center;'>👤</h1>", unsafe_allow_html=True)
             else:
                 st.markdown("<h1 style='margin:0; padding:0; text-align:center;'>👤</h1>", unsafe_allow_html=True)
         with prof_col2:
@@ -225,11 +215,6 @@ else:
                 profile_dialog()
         with act2:
             if st.button("Выйти", icon=":material/logout:", use_container_width=True):
-                token = st.query_params.get("session")
-                if token in db["sessions"]:
-                    del db["sessions"][token]
-                    save_db()
-                st.query_params.clear()
                 st.session_state.logged_in = False
                 st.session_state.username = ""
                 st.session_state.current_chat_id = None
