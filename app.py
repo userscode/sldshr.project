@@ -349,4 +349,3 @@ else:
                 st.rerun()
             else:
                 st.error(f"Не удалось отправить: {err}")
-```eof
