@@ -111,9 +111,6 @@ def save_db():
 def make_hash(password):
     return hashlib.sha256(str.encode(password)).hexdigest()
 
-def generate_group_code():
-    return ''.join(random.choices(string.ascii_uppercase + string.digits, k=8))
-
 def get_dm_id(user1, user2):
     users = sorted([user1, user2])
     return f"dm_{users[0]}_{users[1]}"
@@ -167,30 +164,6 @@ def profile_dialog():
             user_data["avatar"] = base64.b64encode(new_avatar.read()).decode('utf-8')
         save_db()
         st.rerun()
-
-@st.dialog("Создать секретную группу")
-def create_group_dialog():
-    st.markdown("Секретная группа будет доступна только по уникальному коду.")
-    new_group_name = st.text_input("Название группы")
-    if st.button("Создать", type="primary", use_container_width=True):
-        if new_group_name:
-            code = generate_group_code()
-            db["groups"][code] = {"name": new_group_name, "members": [st.session_state.username]}
-            save_db()
-            st.success(f"Группа создана! Код для приглашения: `{code}`")
-
-@st.dialog("Войти по коду")
-def join_group_dialog():
-    join_code = st.text_input("Введите 8-значный код").upper()
-    if st.button("Присоединиться", type="primary", use_container_width=True):
-        if join_code in db["groups"]:
-            if st.session_state.username not in db["groups"][join_code]["members"]:
-                db["groups"][join_code]["members"].append(st.session_state.username)
-                save_db()
-            st.success("Вы добавлены в группу!")
-            st.rerun()
-        else:
-            st.error("Группа с таким кодом не найдена.")
 
 if not st.session_state.logged_in:
     st.markdown("<h1 style='text-align: center; margin-bottom: 0;'>💬 Мессенджер</h1>", unsafe_allow_html=True)
@@ -264,28 +237,6 @@ else:
             
         st.divider()
         
-        # Группы
-        st.markdown("#### :material/forum: Мои группы")
-        has_groups = False
-        for code, group_data in db["groups"].items():
-            if current_user in group_data["members"]:
-                has_groups = True
-                if st.button(f"{group_data['name']}", icon=":material/tag:", type="tertiary", use_container_width=True, key=f"btn_grp_{code}"):
-                    st.session_state.current_chat_id = f"group_{code}"
-                    st.session_state.current_chat_name = group_data['name']
-                    st.rerun()
-        
-        if not has_groups:
-            st.caption("Нет активных групп")
-            
-        grp_act1, grp_act2 = st.columns(2)
-        with grp_act1:
-            if st.button("Создать", icon=":material/group_add:", use_container_width=True): create_group_dialog()
-        with grp_act2:
-            if st.button("Войти", icon=":material/vpn_key:", use_container_width=True): join_group_dialog()
-
-        st.divider()
-
         # Личные сообщения
         st.markdown("#### :material/person: Пользователи")
         other_users = [u for u in db["users"].keys() if u != current_user]
@@ -304,16 +255,10 @@ else:
         chat_id = st.session_state.current_chat_id
         
         if not chat_id:
-            st.info("👈 Выберите чат в меню слева или создайте новую группу.")
+            st.info("👈 Выберите пользователя в списке слева, чтобы начать диалог.")
         else:
-            is_group = chat_id.startswith("group_")
             header_text = st.session_state.current_chat_name
-            if is_group:
-                code = chat_id.split("_")[1]
-                st.subheader(f"{header_text}", help=f"Секретный код группы: {code}")
-                st.caption(f"Код для приглашения: `{code}`")
-            else:
-                st.subheader(f"Чат с {header_text}")
+            st.subheader(f"Чат с {header_text}")
             
             @st.fragment(run_every="2s")
             def show_messages(c_id):
