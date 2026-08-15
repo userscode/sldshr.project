@@ -124,7 +124,7 @@ else:
     # ------------------ ЛЕВОЕ МЕНЮ ------------------
     with col_menu:
         st.subheader(f"👤 {current_user}")
-        if st.button("Выйти", use_container_width=True, size="small"):
+        if st.button("Выйти", use_container_width=True):
             st.session_state.logged_in = False
             st.session_state.username = ""
             st.session_state.current_chat_id = None
