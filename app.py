@@ -3,14 +3,12 @@ import os
 import json
 import uuid
 import tempfile
-import math
+import hashlib
 from datetime import datetime
 from huggingface_hub import HfApi, hf_hub_download
 from huggingface_hub.utils import EntryNotFoundError
 
-# --- АВТОНАСТРОЙКА ЛИМИТОВ STREAMLIT ---
-# Чтобы Streamlit разрешил загружать файлы до 1 ГБ (по умолчанию 200 МБ),
-# мы программно создаем конфиг, если его нет.
+# --- НАСТРОЙКИ STREAMLIT И ЛИМИТОВ (до 200 МБ) ---
 def setup_streamlit_config():
     config_dir = ".streamlit"
     config_file = f"{config_dir}/config.toml"
@@ -18,354 +16,411 @@ def setup_streamlit_config():
         os.makedirs(config_dir)
     if not os.path.exists(config_file):
         with open(config_file, "w") as f:
-            f.write("[server]\nmaxUploadSize = 1024\n")
+            f.write("[server]\nmaxUploadSize = 200\n")
             
 setup_streamlit_config()
 
-# Настройки страницы
-st.set_page_config(page_title="CloudHost - Хостинг файлов", page_icon="☁️", layout="wide")
+st.set_page_config(page_title="CloudChat", page_icon="💬", layout="centered")
 
-# CSS для красивого и приятного интерфейса
+# --- СТИЛИ ДЛЯ ИДЕАЛЬНОГО UI ---
+# Эти стили исправляют баги с огромными видео/фото и делают интерфейс "мессенджером"
 st.markdown("""
 <style>
     #MainMenu {visibility: hidden;}
     header {visibility: hidden;}
     footer {visibility: hidden;}
-    .block-container {
-        padding-top: 2rem !important;
-        max-width: 1000px;
+    
+    /* Ограничение размеров медиа в чате, чтобы не ломался UI */
+    [data-testid="stChatMessage"] img, 
+    [data-testid="stChatMessage"] video {
+        max-height: 300px !important;
+        max-width: 100% !important;
+        width: auto !important;
+        border-radius: 12px;
+        object-fit: cover;
+        margin-top: 8px;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.1);
     }
-    .post-card {
-        background-color: #ffffff;
+    
+    /* Красивые контейнеры комнат */
+    .room-card {
+        padding: 16px;
         border-radius: 16px;
-        padding: 24px;
-        margin-bottom: 24px;
-        box-shadow: 0 4px 20px rgba(0,0,0,0.05);
-        border: 1px solid #edf2f7;
-        transition: transform 0.2s ease, box-shadow 0.2s ease;
+        border: 1px solid #e2e8f0;
+        background: #f8fafc;
+        margin-bottom: 12px;
+        transition: transform 0.2s;
     }
-    .post-card:hover {
-        box-shadow: 0 6px 25px rgba(0,0,0,0.08);
+    [data-theme="dark"] .room-card {
+        background: #1e293b;
+        border-color: #334155;
     }
-    [data-theme="dark"] .post-card {
-        background-color: #1a1a24;
-        border-color: #2d2d3b;
-        box-shadow: 0 4px 20px rgba(0,0,0,0.3);
-    }
-    .file-badge {
-        display: inline-block;
-        padding: 4px 10px;
-        border-radius: 20px;
-        font-size: 12px;
-        font-weight: 600;
-        background-color: #e2e8f0;
-        color: #4a5568;
-        margin-right: 8px;
-        margin-bottom: 8px;
-    }
-    [data-theme="dark"] .file-badge {
-        background-color: #2d3748;
-        color: #e2e8f0;
-    }
-    .stProgress > div > div > div > div {
-        background-color: #6366f1; /* Красивый фиолетовый цвет прогресс-бара */
+    
+    /* Скрытие дефолтной кнопки загрузки файлов, если хотим кастомный UI */
+    .stFileUploader > div > div > button {
+        border-radius: 12px;
     }
 </style>
 """, unsafe_allow_html=True)
 
-ADMIN_PASSWORD = "SuperSecret_Admin_Password_2026!#$"
-
-# Получаем секреты
+# --- ИНИЦИАЛИЗАЦИЯ HUGGING FACE ---
 HF_TOKEN = st.secrets.get("HF_TOKEN", None)
 HF_REPO_ID = st.secrets.get("HF_REPO_ID", None)
 
 if not HF_TOKEN or not HF_REPO_ID:
-    st.error("⚠️ Внимание: Не настроены HF_TOKEN и HF_REPO_ID в Secrets.")
+    st.error("⚠️ Настройте HF_TOKEN и HF_REPO_ID в Secrets.")
     st.stop()
 
 api = HfApi(token=HF_TOKEN)
 
-# --- БАЗА ДАННЫХ ---
-@st.cache_data(ttl=5) # Кэшируем на 5 секунд
+# --- БАЗА ДАННЫХ И ХЭШИРОВАНИЕ ---
+def hash_key(key: str) -> str:
+    """Хэширует ключ доступа для безопасного хранения (SHA-256)"""
+    return hashlib.sha256(key.encode('utf-8')).hexdigest()
+
+@st.cache_data(ttl=2) # Кратковременный кэш для быстрой работы
 def load_db():
     try:
         db_path = hf_hub_download(
             repo_id=HF_REPO_ID, 
-            filename="database.json", 
+            filename="chat_database.json", 
             repo_type="dataset", 
             token=HF_TOKEN
         )
         with open(db_path, "r", encoding="utf-8") as f:
             return json.load(f)
     except EntryNotFoundError:
-        return {"posts": []}
-    except Exception as e:
-        return {"posts": []}
+        return {"users": {}, "rooms": {}, "messages": {}}
+    except Exception:
+        return {"users": {}, "rooms": {}, "messages": {}}
 
-def save_db(db):
+def save_db(db_data):
     with tempfile.NamedTemporaryFile(mode="w", delete=False, encoding="utf-8") as tmp:
-        json.dump(db, tmp, ensure_ascii=False, indent=4)
+        json.dump(db_data, tmp, ensure_ascii=False, indent=2)
         tmp_path = tmp.name
     
     api.upload_file(
         path_or_fileobj=tmp_path,
-        path_in_repo="database.json",
+        path_in_repo="chat_database.json",
         repo_id=HF_REPO_ID,
         repo_type="dataset"
     )
     os.remove(tmp_path)
     load_db.clear()
 
-db = load_db()
+def safe_db_update(update_fn):
+    """Безопасное обновление БД (стягиваем свежую, обновляем, заливаем)"""
+    db = load_db()
+    update_fn(db)
+    save_db(db)
+
+# --- СЕССИИ И НАВИГАЦИЯ ---
+if "user_hash" not in st.session_state:
+    st.session_state.user_hash = None
+if "user_name" not in st.session_state:
+    st.session_state.user_name = None
+if "current_room" not in st.session_state:
+    st.session_state.current_room = None
 
 # --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
 def get_file_type(filename):
     ext = filename.split('.')[-1].lower()
-    if ext in ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg']:
-        return 'image'
-    elif ext in ['mp4', 'mov', 'avi', 'mkv', 'webm']:
-        return 'video'
-    elif ext in ['mp3', 'wav', 'ogg', 'flac']:
-        return 'audio'
-    else:
-        return 'document'
+    if ext in ['jpg', 'jpeg', 'png', 'gif', 'webp']: return 'image'
+    if ext in ['mp4', 'mov', 'webm']: return 'video'
+    if ext in ['mp3', 'wav', 'ogg']: return 'audio'
+    return 'document'
 
-def format_size(size_bytes):
-    if size_bytes == 0: return "0 B"
-    size_name = ("B", "KB", "MB", "GB")
-    i = int(math.floor(math.log(size_bytes, 1024)))
-    p = math.pow(1024, i)
-    s = round(size_bytes / p, 2)
-    return f"{s} {size_name[i]}"
-
-# --- БОКОВОЕ МЕНЮ ---
-with st.sidebar:
-    st.markdown("## ☁️ CloudHost")
-    page = st.radio("Меню", ["🏠 Лента", "📤 Создать пост", "🛡️ Управление"], label_visibility="collapsed")
-    st.divider()
-    st.caption("🚀 Хостинг нового поколения.\n\nЗагружай файлы до **1 ГБ**. Поддерживается фото, видео, аудио и документы.")
-
-# -----------------------------------------
-# ГЛАВНАЯ СТРАНИЦА (Лента постов)
-# -----------------------------------------
-if page == "🏠 Лента":
-    st.title("Лента файлов")
+# --- 1. ЭКРАН АВТОРИЗАЦИИ И РЕГИСТРАЦИИ ---
+if not st.session_state.user_hash:
+    st.title("💬 CloudChat")
+    st.markdown("Защищенный мессенджер с облачным хранением файлов.")
     
-    if not db.get("posts"):
-        st.info("☁️ Здесь пока пусто. Будьте первыми, кто поделится файлами!")
-    else:
-        for post in reversed(db["posts"]):
-            st.markdown('<div class="post-card">', unsafe_allow_html=True)
-            
-            st.subheader(post["title"])
-            st.caption(f"👤 **{post['author']}** • 🕒 {post['timestamp']}")
-            
-            if post["description"]:
-                st.write(post["description"])
-                
-            st.divider()
-            
-            # Сортируем файлы по типам
-            images = [f for f in post['files'] if f['type'] == 'image']
-            videos = [f for f in post['files'] if f['type'] == 'video']
-            audios = [f for f in post['files'] if f['type'] == 'audio']
-            docs = [f for f in post['files'] if f['type'] == 'document']
-            
-            # Отображаем изображения красиво в колонках (Галерея)
-            if images:
-                cols = st.columns(min(len(images), 3)) # Максимум 3 колонки в ряд
-                for i, img_file in enumerate(images):
-                    try:
-                        img_path = hf_hub_download(repo_id=HF_REPO_ID, filename=f"uploads/{img_file['filename']}", repo_type="dataset", token=HF_TOKEN)
-                        with cols[i % 3]:
-                            st.image(img_path, use_container_width=True)
-                    except Exception:
-                        st.error("Файл недоступен")
-
-            # Отображаем видео
-            for vid_file in videos:
-                try:
-                    vid_path = hf_hub_download(repo_id=HF_REPO_ID, filename=f"uploads/{vid_file['filename']}", repo_type="dataset", token=HF_TOKEN)
-                    st.video(vid_path)
-                except Exception:
-                    st.error("Видео недоступно")
-                    
-            # Отображаем аудио
-            for aud_file in audios:
-                try:
-                    aud_path = hf_hub_download(repo_id=HF_REPO_ID, filename=f"uploads/{aud_file['filename']}", repo_type="dataset", token=HF_TOKEN)
-                    st.audio(aud_path)
-                except Exception:
-                    st.error("Аудио недоступно")
-                    
-            # Отображаем документы (кнопки скачивания)
-            if docs:
-                st.markdown("**📎 Прикрепленные документы:**")
-                for doc_file in docs:
-                    try:
-                        doc_path = hf_hub_download(repo_id=HF_REPO_ID, filename=f"uploads/{doc_file['filename']}", repo_type="dataset", token=HF_TOKEN)
-                        with open(doc_path, "rb") as f:
-                            st.download_button(
-                                label=f"Скачать {doc_file['original_name']} ({format_size(doc_file['size'])})",
-                                data=f,
-                                file_name=doc_file['original_name'],
-                                mime="application/octet-stream",
-                                key=f"dl_{doc_file['filename']}"
-                            )
-                    except Exception:
-                        st.error(f"Документ {doc_file['original_name']} недоступен")
-
-            st.markdown('</div>', unsafe_allow_html=True)
-
-# -----------------------------------------
-# СТРАНИЦА ЗАГРУЗКИ (С поддержкой чанков и 1 ГБ)
-# -----------------------------------------
-elif page == "📤 Создать пост":
-    st.title("📤 Поделиться файлами")
-    st.markdown("Здесь можно прикрепить **до 1 ГБ** файлов в один пост. Файлы разбиваются на оптимизированные чанки для стабильной отправки.")
+    tab_login, tab_register = st.tabs(["🔑 Войти по ключу", "📝 Создать аккаунт"])
     
-    with st.form("upload_form", clear_on_submit=False):
-        p_author = st.text_input("Ваше имя", max_chars=50, placeholder="Например: Иван Иванов")
-        p_title = st.text_input("Заголовок поста", max_chars=100, placeholder="Мои новые фотки и видео!")
-        p_desc = st.text_area("Описание (необязательно)", max_chars=1000)
-        
-        uploaded_files = st.file_uploader(
-            "Прикрепите файлы (Фото, Видео, Музыка, Архивы и т.д.)", 
-            accept_multiple_files=True
-        )
-        
-        submitted = st.form_submit_button("🚀 Опубликовать пост", type="primary", use_container_width=True)
-        
-        if submitted:
-            if not p_author or not p_title:
-                st.error("❌ Заполните имя и заголовок!")
-            elif not uploaded_files:
-                st.error("❌ Прикрепите хотя бы один файл!")
+    with tab_register:
+        st.subheader("Новый аккаунт")
+        new_name = st.text_input("Ваше имя (Никнейм)", placeholder="Например: Алекс")
+        if st.button("Сгенерировать ключ доступа", type="primary"):
+            if not new_name.strip():
+                st.error("Введите имя!")
             else:
-                # Проверка лимита 1 ГБ
-                total_size = sum(f.size for f in uploaded_files)
-                max_size = 1024 * 1024 * 1024 # 1 ГБ
+                raw_key = f"CC-{uuid.uuid4().hex[:12].upper()}"
+                hashed = hash_key(raw_key)
                 
-                if total_size > max_size:
-                    st.error(f"❌ Общий размер превышает 1 ГБ! (Текущий: {format_size(total_size)})")
-                else:
-                    progress_text = "Подготовка к обработке файлов..."
-                    progress_bar = st.progress(0, text=progress_text)
-                    
-                    saved_files_data = []
-                    
-                    try:
-                        for idx, file in enumerate(uploaded_files):
-                            file_ext = file.name.split('.')[-1]
-                            unique_filename = f"{uuid.uuid4().hex}.{file_ext}"
-                            file_type = get_file_type(file.name)
-                            
-                            # Имитация и реальная нарезка на чанки для безопасности памяти (200MB chunks)
-                            chunk_size = 200 * 1024 * 1024 
-                            num_chunks = math.ceil(file.size / chunk_size) if file.size > 0 else 1
-                            
-                            progress_bar.progress(
-                                (idx) / len(uploaded_files), 
-                                text=f"📦 Обработка файла {idx+1}/{len(uploaded_files)}: {file.name} (Разделение на чанки...)"
-                            )
-                            
-                            # Сохраняем во временный файл безопасно
-                            with tempfile.NamedTemporaryFile(delete=False, suffix=f".{file_ext}") as tmp_file:
-                                tmp_file.write(file.getbuffer())
-                                tmp_file_path = tmp_file.name
-                                
-                            # Отправка на Hugging Face (их API автоматически использует мультипарт-чанки для больших файлов)
-                            progress_bar.progress(
-                                (idx + 0.5) / len(uploaded_files), 
-                                text=f"☁️ Отправка {file.name} в облако (Чанки по 200МБ)..."
-                            )
-                            
-                            api.upload_file(
-                                path_or_fileobj=tmp_file_path,
-                                path_in_repo=f"uploads/{unique_filename}",
-                                repo_id=HF_REPO_ID,
-                                repo_type="dataset"
-                            )
-                            os.remove(tmp_file_path)
-                            
-                            saved_files_data.append({
-                                "original_name": file.name,
-                                "filename": unique_filename,
-                                "type": file_type,
-                                "size": file.size
-                            })
-                            
-                        # Финальное сохранение поста в БД
-                        progress_bar.progress(0.95, text="📝 Сохранение поста...")
-                        
-                        new_post = {
-                            "id": str(uuid.uuid4()),
-                            "author": p_author,
-                            "title": p_title,
-                            "description": p_desc,
-                            "files": saved_files_data,
-                            "timestamp": datetime.now().strftime("%d.%m.%Y %H:%M")
-                        }
-                        
-                        db["posts"].append(new_post)
-                        save_db(db)
-                        
-                        progress_bar.progress(1.0, text="✅ Готово!")
-                        st.success("🎉 Пост успешно опубликован! Перейдите во вкладку 'Лента'.")
-                        st.balloons()
-                        
-                    except Exception as e:
-                        st.error(f"❌ Произошла ошибка при загрузке: {e}")
-                        progress_bar.empty()
-
-# -----------------------------------------
-# АДМИН-ПАНЕЛЬ
-# -----------------------------------------
-elif page == "🛡️ Управление":
-    st.title("🛡️ Панель администратора")
-    
-    if "admin_auth" not in st.session_state:
-        st.session_state.admin_auth = False
-        
-    if not st.session_state.admin_auth:
-        st.warning("Вход только для администраторов.")
-        pwd = st.text_input("Пароль:", type="password")
+                def add_user(db):
+                    db["users"][hashed] = {
+                        "name": new_name.strip(),
+                        "created": datetime.now().strftime("%d.%m.%Y %H:%M")
+                    }
+                safe_db_update(add_user)
+                
+                st.success("✅ Аккаунт создан!")
+                st.info(f"**Ваш ключ доступа:** `{raw_key}`\n\n⚠️ Скопируйте и сохраните его. Это ваш логин и пароль. Восстановить его невозможно!")
+                
+    with tab_login:
+        st.subheader("Вход в систему")
+        login_key = st.text_input("Введите ваш ключ доступа", type="password")
         if st.button("Войти"):
-            if pwd == ADMIN_PASSWORD:
-                st.session_state.admin_auth = True
-                st.rerun()
+            if not login_key:
+                st.error("Введите ключ!")
             else:
-                st.error("❌ Неверный пароль!")
-    else:
-        st.success("✅ Режим администратора активирован.")
-        if st.button("Выйти", size="small"):
-            st.session_state.admin_auth = False
+                db = load_db()
+                hashed = hash_key(login_key.strip())
+                if hashed in db["users"]:
+                    st.session_state.user_hash = hashed
+                    st.session_state.user_name = db["users"][hashed]["name"]
+                    st.rerun()
+                else:
+                    st.error("❌ Неверный ключ доступа. Аккаунт не найден.")
+    st.stop()
+
+# --- 2. ГЛАВНОЕ МЕНЮ (СПИСОК КОМНАТ) ---
+if not st.session_state.current_room:
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        st.title(f"Привет, {st.session_state.user_name}! 👋")
+    with col2:
+        if st.button("🚪 Выйти", use_container_width=True):
+            st.session_state.user_hash = None
+            st.session_state.user_name = None
             st.rerun()
             
-        st.divider()
-        st.subheader("Управление постами")
+    st.divider()
+    
+    tab_rooms, tab_create, tab_join = st.tabs(["💬 Мои комнаты", "➕ Создать комнату", "🔗 Войти по коду"])
+    
+    db = load_db()
+    
+    with tab_rooms:
+        my_rooms = {code: data for code, data in db["rooms"].items() if st.session_state.user_name in data.get("participants", [])}
         
-        if not db.get("posts"):
-            st.info("База пуста.")
+        if not my_rooms:
+            st.info("Вы пока не состоите ни в одной комнате. Создайте новую или присоединитесь по коду!")
         else:
-            for post in reversed(db["posts"]):
-                with st.container(border=True):
-                    st.markdown(f"**{post['title']}** (От: {post['author']})")
-                    st.caption(f"Файлов: {len(post['files'])}")
-                    
-                    if st.button("🗑️ Удалить пост и все его файлы", key=f"del_{post['id']}", type="primary"):
-                        # Сначала удаляем все файлы поста из облака
-                        for f in post['files']:
+            for code, room in my_rooms.items():
+                st.markdown(f"""
+                <div class="room-card">
+                    <h3>{room.get('avatar', '📁')} {room['name']}</h3>
+                    <p style="color: gray; margin-bottom: 5px;">{room['description']}</p>
+                    <p style="font-size: 12px;">Участников: {len(room.get('participants', []))}</p>
+                </div>
+                """, unsafe_allow_html=True)
+                
+                cols = st.columns([1, 1, 2])
+                if cols[0].button("Войти", key=f"enter_{code}", type="primary"):
+                    st.session_state.current_room = code
+                    st.rerun()
+                cols[1].code(code, language="text")
+                st.write("") # Отступ
+                
+    with tab_create:
+        room_name = st.text_input("Название комнаты", max_chars=50)
+        room_desc = st.text_area("Описание", max_chars=200)
+        room_avatar = st.selectbox("Аватарка", ["📁", "🔥", "🚀", "💡", "🎮", "🎵", "💼", "🍕", "❤️"])
+        
+        if st.button("Создать комнату", type="primary"):
+            if not room_name:
+                st.error("Введите название комнаты!")
+            else:
+                room_code = uuid.uuid4().hex[:10].upper() # 10 символов
+                
+                def add_room(db_data):
+                    db_data["rooms"][room_code] = {
+                        "name": room_name,
+                        "description": room_desc,
+                        "avatar": room_avatar,
+                        "owner": st.session_state.user_name,
+                        "participants": [st.session_state.user_name]
+                    }
+                    db_data["messages"][room_code] = []
+                
+                safe_db_update(add_room)
+                st.success(f"Комната создана! Код для приглашения: **{room_code}**")
+                
+    with tab_join:
+        join_code = st.text_input("Введите 10-значный код комнаты").upper().strip()
+        if st.button("Присоединиться"):
+            if join_code in db["rooms"]:
+                if st.session_state.user_name not in db["rooms"][join_code]["participants"]:
+                    def join_room(db_data):
+                        db_data["rooms"][join_code]["participants"].append(st.session_state.user_name)
+                    safe_db_update(join_room)
+                
+                st.session_state.current_room = join_code
+                st.rerun()
+            else:
+                st.error("❌ Комната с таким кодом не найдена!")
+    st.stop()
+
+
+# --- 3. ЧАТ КОМНАТЫ ---
+room_code = st.session_state.current_room
+db = load_db()
+
+# Если комната была удалена (защита)
+if room_code not in db["rooms"]:
+    st.warning("Эта комната больше не существует.")
+    if st.button("Вернуться"):
+        st.session_state.current_room = None
+        st.rerun()
+    st.stop()
+
+room_info = db["rooms"][room_code]
+
+# Шапка комнаты
+col_back, col_info, col_code = st.columns([1, 6, 2])
+with col_back:
+    if st.button("⬅ Назад"):
+        st.session_state.current_room = None
+        st.rerun()
+with col_info:
+    st.markdown(f"### {room_info.get('avatar', '📁')} {room_info['name']}")
+    st.caption(f"{room_info['description']} • Участники: {', '.join(room_info.get('participants', []))}")
+with col_code:
+    st.code(room_code, language="text")
+
+st.divider()
+
+# ФРАГМЕНТ: Автообновление чата каждые 3 секунды
+@st.fragment(run_every="3s")
+def render_chat():
+    current_db = load_db()
+    messages = current_db["messages"].get(room_code, [])
+    
+    if not messages:
+        st.info("В этой комнате пока нет сообщений.")
+    
+    for msg in messages:
+        # Определяем аватар: сам пользователь - другой аватар
+        is_me = (msg["author"] == st.session_state.user_name)
+        avatar = "👤" if is_me else "💬"
+        
+        with st.chat_message(msg["author"], avatar=avatar):
+            # Шапка сообщения
+            st.markdown(f"**{msg['author']}**  •  <span style='font-size:0.8em; color:gray;'>{msg['timestamp']}</span>", unsafe_allow_html=True)
+            
+            # Текст
+            if msg["text"]:
+                st.write(msg["text"])
+                
+            # Файлы (если есть)
+            if msg.get("files"):
+                images = [f for f in msg["files"] if f["type"] == "image"]
+                videos = [f for f in msg["files"] if f["type"] == "video"]
+                docs = [f for f in msg["files"] if f["type"] not in ["image", "video"]]
+                
+                # Изображения (в колонках для компактности)
+                if images:
+                    img_cols = st.columns(min(len(images), 3))
+                    for idx, img in enumerate(images):
+                        with img_cols[idx % 3]:
                             try:
-                                api.delete_file(
-                                    path_in_repo=f"uploads/{f['filename']}",
-                                    repo_id=HF_REPO_ID,
-                                    repo_type="dataset"
-                                )
-                            except Exception:
-                                pass # Если файл уже удален
-                                
-                        # Затем удаляем сам пост из БД
-                        db["posts"] = [p for p in db["posts"] if p["id"] != post["id"]]
-                        save_db(db)
-                        st.rerun()
+                                path = hf_hub_download(repo_id=HF_REPO_ID, filename=f"uploads/{img['filename']}", repo_type="dataset", token=HF_TOKEN)
+                                st.image(path)
+                            except:
+                                st.error("Фото недоступно")
+                
+                # Видео
+                for vid in videos:
+                    try:
+                        path = hf_hub_download(repo_id=HF_REPO_ID, filename=f"uploads/{vid['filename']}", repo_type="dataset", token=HF_TOKEN)
+                        st.video(path)
+                    except:
+                        st.error("Видео недоступно")
+                
+                # Документы и аудио
+                for doc in docs:
+                    try:
+                        path = hf_hub_download(repo_id=HF_REPO_ID, filename=f"uploads/{doc['filename']}", repo_type="dataset", token=HF_TOKEN)
+                        with open(path, "rb") as f:
+                            st.download_button(
+                                label=f"📎 {doc['original_name']}",
+                                data=f,
+                                file_name=doc['original_name'],
+                                key=f"dl_{msg['id']}_{doc['filename']}"
+                            )
+                    except:
+                        pass
+            
+            # Кнопка удаления (только для своих сообщений)
+            if is_me:
+                if st.button("Удалить 🗑️", key=f"del_{msg['id']}", size="small", help="Удалить сообщение и файлы"):
+                    # Логика удаления
+                    def delete_msg(db_data):
+                        # Находим сообщение
+                        target = next((m for m in db_data["messages"][room_code] if m["id"] == msg["id"]), None)
+                        if target:
+                            # 1. Удаляем файлы с Hugging Face
+                            for f_info in target.get("files", []):
+                                try:
+                                    api.delete_file(
+                                        path_in_repo=f"uploads/{f_info['filename']}",
+                                        repo_id=HF_REPO_ID,
+                                        repo_type="dataset"
+                                    )
+                                except Exception:
+                                    pass # Игнорируем если файла уже нет
+                            # 2. Удаляем из массива
+                            db_data["messages"][room_code].remove(target)
+                    
+                    safe_db_update(delete_msg)
+                    st.rerun()
+
+# Отрисовываем чат (он будет сам обновляться)
+chat_container = st.container(height=500)
+with chat_container:
+    render_chat()
+
+# --- ФОРМА ОТПРАВКИ СООБЩЕНИЯ (загрузка файлов происходит здесь) ---
+st.write("") # Отступ
+with st.expander("📎 Написать сообщение и прикрепить файлы (до 200МБ)", expanded=True):
+    msg_text = st.text_area("Текст сообщения", height=100, label_visibility="collapsed", placeholder="Напишите сообщение...")
+    msg_files = st.file_uploader("Файлы", accept_multiple_files=True, label_visibility="collapsed")
+    
+    if st.button("✈️ Отправить", type="primary", use_container_width=True):
+        if not msg_text.strip() and not msg_files:
+            st.error("Сообщение не может быть пустым!")
+        else:
+            with st.spinner("Отправка..."):
+                uploaded_data = []
+                
+                # Обработка файлов в момент отправки
+                if msg_files:
+                    for file in msg_files:
+                        ext = file.name.split('.')[-1]
+                        unique_filename = f"{uuid.uuid4().hex}.{ext}"
+                        
+                        # Сохраняем временно и грузим в HF
+                        with tempfile.NamedTemporaryFile(delete=False, suffix=f".{ext}") as tmp:
+                            tmp.write(file.getbuffer())
+                            tmp_path = tmp.name
+                        
+                        api.upload_file(
+                            path_or_fileobj=tmp_path,
+                            path_in_repo=f"uploads/{unique_filename}",
+                            repo_id=HF_REPO_ID,
+                            repo_type="dataset"
+                        )
+                        os.remove(tmp_path)
+                        
+                        uploaded_data.append({
+                            "original_name": file.name,
+                            "filename": unique_filename,
+                            "type": get_file_type(file.name)
+                        })
+                
+                # Формируем объект сообщения
+                new_message = {
+                    "id": uuid.uuid4().hex,
+                    "author": st.session_state.user_name,
+                    "text": msg_text.strip(),
+                    "files": uploaded_data,
+                    "timestamp": datetime.now().strftime("%H:%M")
+                }
+                
+                # Сохраняем в БД
+                def add_msg(db_data):
+                    db_data["messages"][room_code].append(new_message)
+                
+                safe_db_update(add_msg)
+                st.rerun() # Перезагрузка для очистки инпутов и обновления чата
