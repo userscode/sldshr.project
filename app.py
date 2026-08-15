@@ -1,11 +1,11 @@
 import streamlit as st
+import hashlib
 from datetime import datetime
 
 # Настраиваем страницу (должно быть первым вызовом)
 st.set_page_config(page_title="Общий чат", page_icon="💬", layout="centered")
 
-# Используем @st.cache_resource, чтобы этот список был один на ВСЕХ пользователей (глобальная переменная).
-# В отличие от session_state, который хранит данные только для одной вкладки браузера.
+# Хранилище сообщений чата
 @st.cache_resource
 def get_chat_store():
     return [
@@ -17,57 +17,116 @@ def get_chat_store():
         }
     ]
 
+# Хранилище пользователей (формат: {"никнейм": "хэш_пароля"})
+@st.cache_resource
+def get_user_store():
+    return {}
+
 chat_store = get_chat_store()
+user_store = get_user_store()
 
-st.title("💬 Открытый мессенджер")
-st.markdown("Написано на **Streamlit**. Сообщения появляются у всех пользователей в реальном времени.")
+# Функция для шифрования паролей
+def make_hash(password):
+    return hashlib.sha256(str.encode(password)).hexdigest()
 
-# Сохраняем никнейм в локальную сессию конкретного пользователя
+# Переменные сессии для конкретного пользователя (открывшего вкладку)
+if "logged_in" not in st.session_state:
+    st.session_state.logged_in = False
 if "username" not in st.session_state:
-    st.session_state.username = "Гость"
+    st.session_state.username = ""
 
-# Поле для ввода никнейма
-username_input = st.text_input("Ваш никнейм:", value=st.session_state.username, max_chars=20)
-st.session_state.username = username_input
+def auth_ui():
+    st.title("🔐 Вход в мессенджер")
+    
+    # Создаем вкладки для входа и регистрации
+    tab_login, tab_register = st.tabs(["Вход", "Регистрация"])
+    
+    with tab_login:
+        st.subheader("Войти в аккаунт")
+        log_user = st.text_input("Никнейм", key="log_user")
+        log_pass = st.text_input("Пароль", type="password", key="log_pass")
+        
+        if st.button("Войти", type="primary"):
+            if not log_user or not log_pass:
+                st.warning("Пожалуйста, заполните все поля.")
+            elif log_user in user_store and user_store[log_user] == make_hash(log_pass):
+                st.session_state.logged_in = True
+                st.session_state.username = log_user
+                st.rerun() # Перезагружаем страницу, чтобы скрыть форму и показать чат
+            else:
+                st.error("Неверный никнейм или пароль!")
 
-# Декоратор @st.fragment(run_every="2s") заставляет обновляться ТОЛЬКО эту функцию каждые 2 секунды.
-# Это позволяет нам подгружать новые сообщения от других людей, не перезагружая всю страницу.
+    with tab_register:
+        st.subheader("Создать новый аккаунт")
+        reg_user = st.text_input("Придумайте никнейм", key="reg_user")
+        reg_pass = st.text_input("Придумайте пароль", type="password", key="reg_pass")
+        reg_pass2 = st.text_input("Повторите пароль", type="password", key="reg_pass2")
+        
+        if st.button("Зарегистрироваться"):
+            if not reg_user or not reg_pass:
+                st.warning("Пожалуйста, заполните все поля.")
+            elif reg_user in user_store:
+                st.error("Пользователь с таким никнеймом уже существует!")
+            elif reg_pass != reg_pass2:
+                st.error("Пароли не совпадают!")
+            else:
+                # Сохраняем зашифрованный пароль
+                user_store[reg_user] = make_hash(reg_pass)
+                st.success("Успешная регистрация! Теперь вы можете войти во вкладке 'Вход'.")
+
+# Эта функция обновляется каждые 2 секунды, чтобы подгружать чужие сообщения
 @st.fragment(run_every="2s")
 def display_chat():
-    # Создаем контейнер фиксированной высоты с прокруткой
     chat_container = st.container(height=500)
-    
     with chat_container:
         for msg in chat_store:
-            # Выбираем иконку/роль в зависимости от того, кто пишет
-            role = "assistant" if msg["name"] == "Система" else "user"
+            # Свои сообщения показываем справа, чужие слева (если поддерживается, иначе просто разделяем роли)
+            is_system = msg["name"] == "Система"
+            is_me = msg["name"] == st.session_state.username
+            
+            # Для визуала: системные сообщения - assistant, остальные - user
+            role = "assistant" if is_system else "user"
             
             with st.chat_message(role):
-                if msg["name"] == "Система":
+                if is_system:
                     st.markdown(msg["content"])
                 else:
-                    st.markdown(f"**{msg['name']}** *(в {msg['time']})*:\n\n{msg['content']}")
+                    # Выделяем свои сообщения подписью "(Вы)"
+                    me_label = " *(Вы)*" if is_me else ""
+                    st.markdown(f"**{msg['name']}**{me_label} *(в {msg['time']})*:\n\n{msg['content']}")
 
-# Запускаем отрисовку чата
-display_chat()
+# Если пользователь не вошел -> показываем форму входа
+if not st.session_state.logged_in:
+    auth_ui()
+    
+# Если вошел -> показываем чат
+else:
+    # Шапка чата с кнопкой выхода
+    col1, col2 = st.columns([8, 2])
+    with col1:
+        st.title("💬 Открытый мессенджер")
+    with col2:
+        st.write("") # Отступ для выравнивания
+        if st.button("Выйти"):
+            st.session_state.logged_in = False
+            st.session_state.username = ""
+            st.rerun()
 
-# Компонент chat_input всегда прикреплен к низу экрана
-if prompt := st.chat_input("Напишите сообщение..."):
-    # Проверка на пустой никнейм
-    current_user = st.session_state.username.strip()
-    if not current_user:
-        current_user = "Аноним"
+    st.markdown(f"Вы вошли как: **{st.session_state.username}**")
+
+    display_chat()
+
+    # Поле ввода (работает только если мы внутри ветки "else" авторизованного пользователя)
+    if prompt := st.chat_input("Напишите сообщение..."):
+        timestamp = datetime.now().strftime("%H:%M:%S")
         
-    timestamp = datetime.now().strftime("%H:%M:%S")
-    
-    # Добавляем сообщение в глобальную память
-    chat_store.append({
-        "role": "user",
-        "name": current_user,
-        "time": timestamp,
-        "content": prompt
-    })
-    
-    # Принудительно перезагружаем страницу пользователя, чтобы его сообщение появилось моментально,
-    # не дожидаясь срабатывания таймера из фрагмента.
-    st.rerun()
+        # Сохраняем сообщение
+        chat_store.append({
+            "role": "user",
+            "name": st.session_state.username,
+            "time": timestamp,
+            "content": prompt
+        })
+        
+        # Обновляем страницу для моментального отображения своего сообщения
+        st.rerun()
