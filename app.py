@@ -4,7 +4,7 @@ import pandas as pd
 import datetime
 import uuid
 import os
-import json
+from io import StringIO
 
 # Page configuration for mobile responsiveness and clean look
 st.set_page_config(
@@ -17,18 +17,14 @@ st.set_page_config(
 # Custom CSS for mobile-friendly UI, chat bubbles, modern styling, and touch targets
 st.markdown("""
 <style>
-    /* Global mobile optimization */
     .stApp {
         max-width: 100%;
         padding: 0px;
     }
-    
-    /* Hide default streamlit elements for clean app feel */
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
     header {visibility: hidden;}
     
-    /* Custom chat bubble styling */
     .chat-bubble-user {
         background: linear-gradient(135deg, #0084ff 0%, #00c6ff 100%);
         color: white;
@@ -70,7 +66,6 @@ st.markdown("""
         text-align: right;
     }
 
-    /* Mobile friendly buttons and inputs */
     div.stButton > button {
         border-radius: 12px;
         height: 48px;
@@ -81,24 +76,26 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 USERS_REPO = "p1rs2/messenger.storage"
-MESSAGES_REPO = "p1rs2/messenger.messages"  # Using clean repo format for raw API fallback
+MESSAGES_REPO = "p1rs2/messenger.messages"
 
 hf_token = st.secrets.get("HF_TOKEN", os.environ.get("HF_TOKEN", None))
 
 def get_headers():
     headers = {"Content-Type": "application/json"}
-    if hf_token:
+    if hf_token and hf_token != "slds":
         headers["Authorization"] = f"Bearer {hf_token}"
     return headers
 
-@st.cache_data(ttl=3)
+@st.cache_data(ttl=2)
 def load_hf_csv(repo_id, columns):
     url = f"https://huggingface.co/datasets/{repo_id}/raw/main/data.csv"
     try:
         resp = requests.get(url, headers=get_headers(), timeout=5)
         if resp.status_code == 200:
-            from io import StringIO
             df = pd.read_csv(StringIO(resp.text))
+            for col in columns:
+                if col not in df.columns:
+                    df[col] = ""
             return df
     except Exception:
         pass
@@ -106,14 +103,18 @@ def load_hf_csv(repo_id, columns):
 
 def save_hf_csv(repo_id, df, columns):
     try:
-        from huggingface_hub import HfApi
-        if not hf_token:
-            return False, "Требуется HF_TOKEN с правами WRITE в secrets."
+        if not hf_token or hf_token == "slds":
+            return False, "Укажите действительный рабочий токен HF_TOKEN (с правами Write) в секретах Streamlit."
         
-        csv_data = df.to_csv(index=False)
+        from huggingface_hub import HfApi, create_repo
         api = HfApi(token=hf_token)
         
-        # Save locally to temp and upload commit
+        try:
+            create_repo(repo_id=repo_id, repo_type="dataset", exist_ok=True, private=False)
+        except Exception:
+            pass
+            
+        csv_data = df.to_csv(index=False)
         import tempfile
         with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".csv") as f:
             f.write(csv_data)
@@ -152,7 +153,7 @@ def load_messages():
 
 def save_user(username, password):
     df = load_users()
-    if not df.empty and username in df['username'].values:
+    if not df.empty and username in df['username'].astype(str).values:
         return False, "Пользователь уже существует!"
     
     new_row = pd.DataFrame([{"username": username, "password": password, "created_at": str(datetime.datetime.now())}])
@@ -174,14 +175,18 @@ def save_message(sender, recipient, content, is_group):
     }])
     
     updated_df = pd.concat([df, new_row], ignore_index=True)
-    return save_hf_csv(MESSAGES_REPO, updated_df, ["id", "sender", "recipient", "content", "timestamp", "is_group"])
+    return save_message_to_hf(MESSAGES_REPO, updated_df, ["id", "sender", "recipient", "content", "timestamp", "is_group"])
+
+def save_message_to_hf(repo_id, df, columns):
+    success, err = save_hf_csv(repo_id, df, columns)
+    return success, err
 
 if not st.session_state.logged_in:
     st.markdown("<h2 style='text-align: center;'>💬 HuggingChat Messenger</h2>", unsafe_allow_html=True)
     st.markdown("<p style='text-align: center; color: gray;'>Мобильный чат на Hugging Face Datasets</p>", unsafe_allow_html=True)
     
-    if not hf_token:
-        st.warning("⚠️ Внимание: Установите HF_TOKEN в секретах Streamlit для полноценной регистрации и отправки сообщений.")
+    if not hf_token or hf_token == "slds":
+        st.warning("⚠️ Внимание: Установите реальный HF_TOKEN с правами Write в секретах Streamlit.")
 
     tab_login, tab_register = st.tabs(["🔑 Вход", "📝 Регистрация"])
     
@@ -344,3 +349,4 @@ else:
                 st.rerun()
             else:
                 st.error(f"Не удалось отправить: {err}")
+```eof
