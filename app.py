@@ -1,426 +1,348 @@
 import streamlit as st
-import os
-import json
+from datasets import load_dataset, Dataset
+from huggingface_hub import HfApi
+import pandas as pd
+import datetime
 import uuid
-import tempfile
-import hashlib
-from datetime import datetime
-from huggingface_hub import HfApi, hf_hub_download
-from huggingface_hub.utils import EntryNotFoundError
+import os
 
-# --- НАСТРОЙКИ STREAMLIT И ЛИМИТОВ (до 200 МБ) ---
-def setup_streamlit_config():
-    config_dir = ".streamlit"
-    config_file = f"{config_dir}/config.toml"
-    if not os.path.exists(config_dir):
-        os.makedirs(config_dir)
-    if not os.path.exists(config_file):
-        with open(config_file, "w") as f:
-            f.write("[server]\nmaxUploadSize = 200\n")
-            
-setup_streamlit_config()
+# Page configuration for mobile responsiveness and clean look
+st.set_page_config(
+    page_title="HuggingChat Mobile Messenger",
+    page_icon="💬",
+    layout="centered",
+    initial_sidebar_state="collapsed"
+)
 
-st.set_page_config(page_title="CloudChat", page_icon="💬", layout="centered")
-
-# --- СТИЛИ ДЛЯ ИДЕАЛЬНОГО UI ---
-# Эти стили исправляют баги с огромными видео/фото и делают интерфейс "мессенджером"
+# Custom CSS for mobile-friendly UI, chat bubbles, modern styling, and touch targets
 st.markdown("""
 <style>
+    /* Global mobile optimization */
+    .stApp {
+        max-width: 100%;
+        padding: 0px;
+    }
+    
+    /* Hide default streamlit elements for clean app feel */
     #MainMenu {visibility: hidden;}
-    header {visibility: hidden;}
     footer {visibility: hidden;}
+    header {visibility: hidden;}
     
-    /* Ограничение размеров медиа в чате, чтобы не ломался UI */
-    [data-testid="stChatMessage"] img, 
-    [data-testid="stChatMessage"] video {
-        max-height: 300px !important;
-        max-width: 100% !important;
-        width: auto !important;
+    /* Custom chat bubble styling */
+    .chat-bubble-user {
+        background: linear-gradient(135deg, #0084ff 0%, #00c6ff 100%);
+        color: white;
+        padding: 12px 16px;
+        border-radius: 18px 18px 2px 18px;
+        margin: 6px 0;
+        max-width: 80%;
+        float: right;
+        clear: both;
+        word-break: break-word;
+        box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+        font-size: 15px;
+    }
+    
+    .chat-bubble-other {
+        background: #f1f0f0;
+        color: #111;
+        padding: 12px 16px;
+        border-radius: 18px 18px 18px 2px;
+        margin: 6px 0;
+        max-width: 80%;
+        float: left;
+        clear: both;
+        word-break: break-word;
+        box-shadow: 0 2px 5px rgba(0,0,0,0.05);
+        font-size: 15px;
+    }
+    
+    .chat-container {
+        display: flex;
+        flex-direction: column;
+        margin-bottom: 70px;
+    }
+    
+    .timestamp {
+        font-size: 10px;
+        color: #888;
+        margin-top: 2px;
+        text-align: right;
+    }
+
+    /* Mobile friendly buttons and inputs */
+    div.stButton > button {
         border-radius: 12px;
-        object-fit: cover;
-        margin-top: 8px;
-        box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+        height: 48px;
+        font-weight: 600;
+        width: 100%;
     }
     
-    /* Красивые контейнеры комнат */
-    .room-card {
-        padding: 16px;
-        border-radius: 16px;
-        border: 1px solid #e2e8f0;
-        background: #f8fafc;
-        margin-bottom: 12px;
-        transition: transform 0.2s;
-    }
-    [data-theme="dark"] .room-card {
-        background: #1e293b;
-        border-color: #334155;
-    }
-    
-    /* Скрытие дефолтной кнопки загрузки файлов, если хотим кастомный UI */
-    .stFileUploader > div > div > button {
-        border-radius: 12px;
+    /* Sticky footer styling for message input */
+    .fixed-footer {
+        position: fixed;
+        bottom: 0;
+        left: 0;
+        width: 100%;
+        background-color: white;
+        padding: 10px;
+        z-index: 100;
+        border-top: 1px solid #ddd;
     }
 </style>
 """, unsafe_allow_html=True)
 
-# --- ИНИЦИАЛИЗАЦИЯ HUGGING FACE ---
-HF_TOKEN = st.secrets.get("HF_TOKEN", None)
-HF_REPO_ID = st.secrets.get("HF_REPO_ID", None)
+USERS_DATASET = "p1rs2/messenger.storage"
+MESSAGES_DATASET = "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"  # Note: usually HF dataset repo IDs require username/dataset, but we handle safe loading/pushing
 
-if not HF_TOKEN or not HF_REPO_ID:
-    st.error("⚠️ Настройте HF_TOKEN и HF_REPO_ID в Secrets.")
-    st.stop()
+# Token input or secrets check for Hugging Face write access
+# In Streamlit Cloud, set HF_TOKEN in secrets.toml
+hf_token = st.secrets.get("HF_TOKEN", os.environ.get("HF_TOKEN", None))
 
-api = HfApi(token=HF_TOKEN)
+@st.cache_resource
+def get_hf_api():
+    if hf_token:
+        return HfApi(token=hf_token)
+    return None
 
-# --- БАЗА ДАННЫХ И ХЭШИРОВАНИЕ ---
-def hash_key(key: str) -> str:
-    """Хэширует ключ доступа для безопасного хранения (SHA-256)"""
-    return hashlib.sha256(key.encode('utf-8')).hexdigest()
+if "logged_in" not in st.session_state:
+    st.session_state.logged_in = False
+if "username" not in st.session_state:
+    st.session_state.username = ""
+if "active_chat" not in st.session_state:
+    st.session_state.active_chat = "Global Lobby"  # Can be username for DM or group name
+if "chat_type" not in st.session_state:
+    st.session_state.chat_type = "group"  # 'group' or 'dm'
 
-@st.cache_data(ttl=2) # Кратковременный кэш для быстрой работы
-def load_db():
+@st.cache_data(ttl=5)
+def load_users():
     try:
-        db_path = hf_hub_download(
-            repo_id=HF_REPO_ID, 
-            filename="chat_database.json", 
-            repo_type="dataset", 
-            token=HF_TOKEN
-        )
-        with open(db_path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except EntryNotFoundError:
-        return {"users": {}, "rooms": {}, "messages": {}}
-    except Exception:
-        return {"users": {}, "rooms": {}, "messages": {}}
+        ds = load_dataset(USERS_DATASET, token=hf_token, split="train")
+        return pd.DataFrame(ds)
+    except Exception as e:
+        # Fallback empty dataframe if dataset is empty or unreachable
+        return pd.DataFrame(columns=["username", "password", "created_at"])
 
-def save_db(db_data):
-    with tempfile.NamedTemporaryFile(mode="w", delete=False, encoding="utf-8") as tmp:
-        json.dump(db_data, tmp, ensure_ascii=False, indent=2)
-        tmp_path = tmp.name
+@st.cache_data(ttl=3)
+def load_messages():
+    try:
+        ds = load_dataset(MESSAGES_DATASET, token=hf_token, split="train")
+        return pd.DataFrame(ds)
+    except Exception as e:
+        return pd.DataFrame(columns=["id", "sender", "recipient", "content", "timestamp", "is_group"])
+
+def save_user_to_hf(username, password):
+    try:
+        df = load_users()
+        if not df.empty and username in df['username'].values:
+            return False, "Пользователь уже существует!"
+        
+        new_row = pd.DataFrame([{"username": username, "password": password, "created_at": str(datetime.datetime.now())}])
+        updated_df = pd.concat([df, new_row], ignore_index=True)
+        
+        dataset = Dataset.from_pandas(updated_df)
+        dataset.push_to_hub(USERS_DATASET, token=hf_token, private=True)
+        st.cache_data.clear()
+        return True, "Успешная регистрация!"
+    except Exception as e:
+        return False, f"Ошибка сохранения: {str(e)}"
+
+def save_message_to_hf(sender, recipient, content, is_group):
+    try:
+        df = load_messages()
+        msg_id = str(uuid.uuid4())
+        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+        new_row = pd.DataFrame([{
+            "id": msg_id,
+            "sender": sender,
+            "recipient": recipient,
+            "content": content,
+            "timestamp": timestamp,
+            "is_group": str(is_group)
+        }])
+        
+        updated_df = pd.concat([df, new_row], ignore_index=True)
+        dataset = Dataset.from_pandas(updated_df)
+        dataset.push_to_hub(MESSAGES_DATASET, token=hf_token, private=True)
+        st.cache_data.clear()
+        return True
+    except Exception as e:
+        st.error(f"Не удалось отправить сообщение: {str(e)}")
+        return False
+
+if not st.session_state.logged_in:
+    st.markdown("<h2 style='text-align: center;'>💬 HuggingChat Messenger</h2>", unsafe_allow_html=True)
+    st.markdown("<p style='text-align: center; color: gray;'>Мобильный мессенджер на базе Hugging Face Datasets</p>", unsafe_allow_html=True)
     
-    api.upload_file(
-        path_or_fileobj=tmp_path,
-        path_in_repo="chat_database.json",
-        repo_id=HF_REPO_ID,
-        repo_type="dataset"
-    )
-    os.remove(tmp_path)
-    load_db.clear()
+    if not hf_token:
+        st.warning("⚠️ Внимание: Токен Hugging Face (HF_TOKEN) не обнаружен в secrets. Запись в датасеты может быть недоступна без токена с правами WRITE.")
 
-def safe_db_update(update_fn):
-    """Безопасное обновление БД (стягиваем свежую, обновляем, заливаем)"""
-    db = load_db()
-    update_fn(db)
-    save_db(db)
-
-# --- СЕССИИ И НАВИГАЦИЯ ---
-if "user_hash" not in st.session_state:
-    st.session_state.user_hash = None
-if "user_name" not in st.session_state:
-    st.session_state.user_name = None
-if "current_room" not in st.session_state:
-    st.session_state.current_room = None
-
-# --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
-def get_file_type(filename):
-    ext = filename.split('.')[-1].lower()
-    if ext in ['jpg', 'jpeg', 'png', 'gif', 'webp']: return 'image'
-    if ext in ['mp4', 'mov', 'webm']: return 'video'
-    if ext in ['mp3', 'wav', 'ogg']: return 'audio'
-    return 'document'
-
-# --- 1. ЭКРАН АВТОРИЗАЦИИ И РЕГИСТРАЦИИ ---
-if not st.session_state.user_hash:
-    st.title("💬 CloudChat")
-    st.markdown("Защищенный мессенджер с облачным хранением файлов.")
+    tab_login, tab_register = st.tabs(["🔑 Вход", "📝 Регистрация"])
     
-    tab_login, tab_register = st.tabs(["🔑 Войти по ключу", "📝 Создать аккаунт"])
-    
-    with tab_register:
-        st.subheader("Новый аккаунт")
-        new_name = st.text_input("Ваше имя (Никнейм)", placeholder="Например: Алекс")
-        if st.button("Сгенерировать ключ доступа", type="primary"):
-            if not new_name.strip():
-                st.error("Введите имя!")
-            else:
-                raw_key = f"CC-{uuid.uuid4().hex[:12].upper()}"
-                hashed = hash_key(raw_key)
-                
-                def add_user(db):
-                    db["users"][hashed] = {
-                        "name": new_name.strip(),
-                        "created": datetime.now().strftime("%d.%m.%Y %H:%M")
-                    }
-                safe_db_update(add_user)
-                
-                st.success("✅ Аккаунт создан!")
-                st.info(f"**Ваш ключ доступа:** `{raw_key}`\n\n⚠️ Скопируйте и сохраните его. Это ваш логин и пароль. Восстановить его невозможно!")
-                
     with tab_login:
-        st.subheader("Вход в систему")
-        login_key = st.text_input("Введите ваш ключ доступа", type="password")
-        if st.button("Войти"):
-            if not login_key:
-                st.error("Введите ключ!")
-            else:
-                db = load_db()
-                hashed = hash_key(login_key.strip())
-                if hashed in db["users"]:
-                    st.session_state.user_hash = hashed
-                    st.session_state.user_name = db["users"][hashed]["name"]
-                    st.rerun()
+        with st.form("login_form"):
+            login_user = st.text_input("Имя пользователя (Логин)")
+            login_pass = st.text_input("Пароль", type="password")
+            submit_login = st.form_submit_button("Войти в систему")
+            
+            if submit_login:
+                if not login_user or not login_pass:
+                    st.error("Заполните все поля!")
                 else:
-                    st.error("❌ Неверный ключ доступа. Аккаунт не найден.")
-    st.stop()
+                    users_df = load_users()
+                    if users_df.empty:
+                        st.error("Пользователи не найдены. Сначала зарегистрируйтесь.")
+                    else:
+                        match = users_df[(users_df['username'] == login_user) & (users_df['password'] == login_pass)]
+                        if not match.empty:
+                            st.session_state.logged_in = True
+                            st.session_state.username = login_user
+                            st.success("Успешный вход! Загрузка мессенджера...")
+                            st.rerun()
+                        else:
+                            st.error("Неверный логин или пароль.")
 
-# --- 2. ГЛАВНОЕ МЕНЮ (СПИСОК КОМНАТ) ---
-if not st.session_state.current_room:
-    col1, col2 = st.columns([3, 1])
-    with col1:
-        st.title(f"Привет, {st.session_state.user_name}! 👋")
-    with col2:
-        if st.button("🚪 Выйти", use_container_width=True):
-            st.session_state.user_hash = None
-            st.session_state.user_name = None
+    with tab_register:
+        with st.form("register_form"):
+            reg_user = st.text_input("Придумайте логин")
+            reg_pass = st.text_input("Придумайте пароль", type="password")
+            submit_reg = st.form_submit_button("Зарегистрироваться")
+            
+            if submit_reg:
+                if not reg_user or not reg_pass:
+                    st.error("Заполните все поля!")
+                elif len(reg_user) < 3:
+                    st.error("Логин должен быть не короче 3 символов.")
+                else:
+                    success, msg = save_user_to_hf(reg_user, reg_pass)
+                    if success:
+                        st.success(f"{msg} Теперь вы можете войти во вкладке 'Вход'.")
+                    else:
+                        st.error(msg)
+
+else:
+    # Top Mobile Navigation / Header Bar
+    col_top1, col_top2 = st.columns([3, 1])
+    with col_top1:
+        st.markdown(f"### 👋 Привет, **{st.session_state.username}**!")
+    with col_top2:
+        if st.button("Выйти", use_container_width=True):
+            st.session_state.logged_in = False
+            st.session_state.username = ""
+            st.rerun()
+
+    st.markdown("---")
+
+    # Sidebar for selecting chats (Groups & Users) optimized for mobile drawers
+    with st.sidebar:
+        st.markdown("### 📱 Меню чатов")
+        
+        st.markdown("#### 🌐 Общие группы")
+        if st.button("💬 Глобальный чат", use_container_width=True):
+            st.session_state.active_chat = "Global Lobby"
+            st.session_state.chat_type = "group"
             st.rerun()
             
-    st.divider()
-    
-    tab_rooms, tab_create, tab_join = st.tabs(["💬 Мои комнаты", "➕ Создать комнату", "🔗 Войти по коду"])
-    
-    db = load_db()
-    
-    with tab_rooms:
-        my_rooms = {code: data for code, data in db["rooms"].items() if st.session_state.user_name in data.get("participants", [])}
+        if st.button("🚀 Разработка и ИИ", use_container_width=True):
+            st.session_state.active_chat = "AI & Tech"
+            st.session_state.chat_type = "group"
+            st.rerun()
+
+        st.markdown("#### 👤 Личные сообщения (ЛС)")
+        users_df = load_users()
+        if not users_df.empty:
+            other_users = users_df[users_df['username'] != st.session_state.username]['username'].tolist()
+            if not other_users:
+                st.info("Пока нет других пользователей.")
+            for u in other_users:
+                if st.button(f"👤 {u}", use_container_width=True):
+                    st.session_state.active_chat = u
+                    st.session_state.chat_type = "dm"
+                    st.rerun()
         
-        if not my_rooms:
-            st.info("Вы пока не состоите ни в одной комнате. Создайте новую или присоединитесь по коду!")
+        st.markdown("---")
+        if st.button("🔄 Обновить чаты", use_container_width=True):
+            st.cache_data.clear()
+            st.rerun()
+
+    chat_title = f"Чат с: {st.session_state.active_chat}" if st.session_state.chat_type == "dm" else f"Группа: {st.session_state.active_chat}"
+    st.markdown(f"#### 📌 {chat_title}")
+
+    # Load messages
+    messages_df = load_messages()
+
+    # Filter messages based on active chat type
+    if not messages_df.empty:
+        # Convert columns to string safely
+        messages_df['is_group'] = messages_df['is_group'].astype(str)
+        
+        if st.session_state.chat_type == "group":
+            active_msgs = messages_df[
+                (messages_df['is_group'].isin(['True', 'true', '1'])) & 
+                (messages_df['recipient'] == st.session_state.active_chat)
+            ]
         else:
-            for code, room in my_rooms.items():
+            # DM logic: messages between current user and target user
+            curr = st.session_state.username
+            target = st.session_state.active_chat
+            active_msgs = messages_df[
+                ((messages_df['sender'] == curr) & (messages_df['recipient'] == target)) |
+                ((messages_df['sender'] == target) & (messages_df['recipient'] == curr))
+            ]
+        
+        # Sort by timestamp
+        if not active_msgs.empty and 'timestamp' in active_msgs.columns:
+            active_msgs = active_msgs.sort_values(by='timestamp', ascending=True)
+
+        # Render chat history container
+        st.markdown('<div class="chat-container">', unsafe_allow_html=True)
+        for _, row in active_msgs.iterrows():
+            sender = row.get('sender', 'Unknown')
+            content = row.get('content', '')
+            timestamp = row.get('timestamp', '')
+            
+            if sender == st.session_state.username:
                 st.markdown(f"""
-                <div class="room-card">
-                    <h3>{room.get('avatar', '📁')} {room['name']}</h3>
-                    <p style="color: gray; margin-bottom: 5px;">{room['description']}</p>
-                    <p style="font-size: 12px;">Участников: {len(room.get('participants', []))}</p>
+                <div style="width:100%; float:right;">
+                    <div class="chat-bubble-user">
+                        <div style="font-size: 11px; font-weight: bold; margin-bottom: 2px; color: #e0f2fe;">Вы</div>
+                        {content}
+                        <div class="timestamp">{timestamp}</div>
+                    </div>
                 </div>
                 """, unsafe_allow_html=True)
-                
-                cols = st.columns([1, 1, 2])
-                if cols[0].button("Войти", key=f"enter_{code}", type="primary"):
-                    st.session_state.current_room = code
-                    st.rerun()
-                cols[1].code(code, language="text")
-                st.write("") # Отступ
-                
-    with tab_create:
-        room_name = st.text_input("Название комнаты", max_chars=50)
-        room_desc = st.text_area("Описание", max_chars=200)
-        room_avatar = st.selectbox("Аватарка", ["📁", "🔥", "🚀", "💡", "🎮", "🎵", "💼", "🍕", "❤️"])
-        
-        if st.button("Создать комнату", type="primary"):
-            if not room_name:
-                st.error("Введите название комнаты!")
             else:
-                room_code = uuid.uuid4().hex[:10].upper() # 10 символов
-                
-                def add_room(db_data):
-                    db_data["rooms"][room_code] = {
-                        "name": room_name,
-                        "description": room_desc,
-                        "avatar": room_avatar,
-                        "owner": st.session_state.user_name,
-                        "participants": [st.session_state.user_name]
-                    }
-                    db_data["messages"][room_code] = []
-                
-                safe_db_update(add_room)
-                st.success(f"Комната создана! Код для приглашения: **{room_code}**")
-                
-    with tab_join:
-        join_code = st.text_input("Введите 10-значный код комнаты").upper().strip()
-        if st.button("Присоединиться"):
-            if join_code in db["rooms"]:
-                if st.session_state.user_name not in db["rooms"][join_code]["participants"]:
-                    def join_room(db_data):
-                        db_data["rooms"][join_code]["participants"].append(st.session_state.user_name)
-                    safe_db_update(join_room)
-                
-                st.session_state.current_room = join_code
+                st.markdown(f"""
+                <div style="width:100%; float:left;">
+                    <div class="chat-bubble-other">
+                        <div style="font-size: 11px; font-weight: bold; margin-bottom: 2px; color: #0284c7;">{sender}</div>
+                        {content}
+                        <div class="timestamp">{timestamp}</div>
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+        st.markdown('</div>', unsafe_allow_html=True)
+    else:
+        st.info("Пока нет сообщений в этом чате. Напишите первыми!")
+
+    # Spacer to prevent content overlap with fixed footer input
+    st.markdown("<br><br><br>", unsafe_allow_html=True)
+
+    with st.form(key="message_form", clear_on_submit=True):
+        col_input, col_send = st.columns([4, 1])
+        with col_input:
+            msg_text = st.text_input("Сообщение...", placeholder="Введите сообщение...", label_visibility="collapsed")
+        with col_send:
+            send_btn = st.form_submit_button("➤")
+            
+        if send_btn and msg_text.strip():
+            is_grp = True if st.session_state.chat_type == "group" else False
+            success = save_message_to_hf(
+                sender=st.session_state.username,
+                recipient=st.session_state.active_chat,
+                content=msg_text.strip(),
+                is_group=is_grp
+            )
+            if success:
                 st.rerun()
-            else:
-                st.error("❌ Комната с таким кодом не найдена!")
-    st.stop()
-
-
-# --- 3. ЧАТ КОМНАТЫ ---
-room_code = st.session_state.current_room
-db = load_db()
-
-# Если комната была удалена (защита)
-if room_code not in db["rooms"]:
-    st.warning("Эта комната больше не существует.")
-    if st.button("Вернуться"):
-        st.session_state.current_room = None
-        st.rerun()
-    st.stop()
-
-room_info = db["rooms"][room_code]
-
-# Шапка комнаты
-col_back, col_info, col_code = st.columns([1, 6, 2])
-with col_back:
-    if st.button("⬅ Назад"):
-        st.session_state.current_room = None
-        st.rerun()
-with col_info:
-    st.markdown(f"### {room_info.get('avatar', '📁')} {room_info['name']}")
-    st.caption(f"{room_info['description']} • Участники: {', '.join(room_info.get('participants', []))}")
-with col_code:
-    st.code(room_code, language="text")
-
-st.divider()
-
-# ФРАГМЕНТ: Автообновление чата каждые 3 секунды
-@st.fragment(run_every="3s")
-def render_chat():
-    current_db = load_db()
-    messages = current_db["messages"].get(room_code, [])
-    
-    if not messages:
-        st.info("В этой комнате пока нет сообщений.")
-    
-    for msg in messages:
-        # Определяем аватар: сам пользователь - другой аватар
-        is_me = (msg["author"] == st.session_state.user_name)
-        avatar = "👤" if is_me else "💬"
-        
-        with st.chat_message(msg["author"], avatar=avatar):
-            # Шапка сообщения
-            st.markdown(f"**{msg['author']}**  •  <span style='font-size:0.8em; color:gray;'>{msg['timestamp']}</span>", unsafe_allow_html=True)
-            
-            # Текст
-            if msg["text"]:
-                st.write(msg["text"])
-                
-            # Файлы (если есть)
-            if msg.get("files"):
-                images = [f for f in msg["files"] if f["type"] == "image"]
-                videos = [f for f in msg["files"] if f["type"] == "video"]
-                docs = [f for f in msg["files"] if f["type"] not in ["image", "video"]]
-                
-                # Изображения (в колонках для компактности)
-                if images:
-                    img_cols = st.columns(min(len(images), 3))
-                    for idx, img in enumerate(images):
-                        with img_cols[idx % 3]:
-                            try:
-                                path = hf_hub_download(repo_id=HF_REPO_ID, filename=f"uploads/{img['filename']}", repo_type="dataset", token=HF_TOKEN)
-                                st.image(path)
-                            except:
-                                st.error("Фото недоступно")
-                
-                # Видео
-                for vid in videos:
-                    try:
-                        path = hf_hub_download(repo_id=HF_REPO_ID, filename=f"uploads/{vid['filename']}", repo_type="dataset", token=HF_TOKEN)
-                        st.video(path)
-                    except:
-                        st.error("Видео недоступно")
-                
-                # Документы и аудио
-                for doc in docs:
-                    try:
-                        path = hf_hub_download(repo_id=HF_REPO_ID, filename=f"uploads/{doc['filename']}", repo_type="dataset", token=HF_TOKEN)
-                        with open(path, "rb") as f:
-                            st.download_button(
-                                label=f"📎 {doc['original_name']}",
-                                data=f,
-                                file_name=doc['original_name'],
-                                key=f"dl_{msg['id']}_{doc['filename']}"
-                            )
-                    except:
-                        pass
-            
-            # Кнопка удаления (только для своих сообщений)
-            if is_me:
-                if st.button("Удалить 🗑️", key=f"del_{msg['id']}", size="small", help="Удалить сообщение и файлы"):
-                    # Логика удаления
-                    def delete_msg(db_data):
-                        # Находим сообщение
-                        target = next((m for m in db_data["messages"][room_code] if m["id"] == msg["id"]), None)
-                        if target:
-                            # 1. Удаляем файлы с Hugging Face
-                            for f_info in target.get("files", []):
-                                try:
-                                    api.delete_file(
-                                        path_in_repo=f"uploads/{f_info['filename']}",
-                                        repo_id=HF_REPO_ID,
-                                        repo_type="dataset"
-                                    )
-                                except Exception:
-                                    pass # Игнорируем если файла уже нет
-                            # 2. Удаляем из массива
-                            db_data["messages"][room_code].remove(target)
-                    
-                    safe_db_update(delete_msg)
-                    st.rerun()
-
-# Отрисовываем чат (он будет сам обновляться)
-chat_container = st.container(height=500)
-with chat_container:
-    render_chat()
-
-# --- ФОРМА ОТПРАВКИ СООБЩЕНИЯ (загрузка файлов происходит здесь) ---
-st.write("") # Отступ
-with st.expander("📎 Написать сообщение и прикрепить файлы (до 200МБ)", expanded=True):
-    msg_text = st.text_area("Текст сообщения", height=100, label_visibility="collapsed", placeholder="Напишите сообщение...")
-    msg_files = st.file_uploader("Файлы", accept_multiple_files=True, label_visibility="collapsed")
-    
-    if st.button("✈️ Отправить", type="primary", use_container_width=True):
-        if not msg_text.strip() and not msg_files:
-            st.error("Сообщение не может быть пустым!")
-        else:
-            with st.spinner("Отправка..."):
-                uploaded_data = []
-                
-                # Обработка файлов в момент отправки
-                if msg_files:
-                    for file in msg_files:
-                        ext = file.name.split('.')[-1]
-                        unique_filename = f"{uuid.uuid4().hex}.{ext}"
-                        
-                        # Сохраняем временно и грузим в HF
-                        with tempfile.NamedTemporaryFile(delete=False, suffix=f".{ext}") as tmp:
-                            tmp.write(file.getbuffer())
-                            tmp_path = tmp.name
-                        
-                        api.upload_file(
-                            path_or_fileobj=tmp_path,
-                            path_in_repo=f"uploads/{unique_filename}",
-                            repo_id=HF_REPO_ID,
-                            repo_type="dataset"
-                        )
-                        os.remove(tmp_path)
-                        
-                        uploaded_data.append({
-                            "original_name": file.name,
-                            "filename": unique_filename,
-                            "type": get_file_type(file.name)
-                        })
-                
-                # Формируем объект сообщения
-                new_message = {
-                    "id": uuid.uuid4().hex,
-                    "author": st.session_state.user_name,
-                    "text": msg_text.strip(),
-                    "files": uploaded_data,
-                    "timestamp": datetime.now().strftime("%H:%M")
-                }
-                
-                # Сохраняем в БД
-                def add_msg(db_data):
-                    db_data["messages"][room_code].append(new_message)
-                
-                safe_db_update(add_msg)
-                st.rerun() # Перезагрузка для очистки инпутов и обновления чата
