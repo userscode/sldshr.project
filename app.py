@@ -329,13 +329,13 @@ else:
                         try:
                             media_bytes = base64.b64decode(msg["content"])
                             if msg["type"] == "image":
-                                st.image(io.BytesIO(media_bytes), width=300, border=True)
+                                st.image(io.BytesIO(media_bytes), width=300)
                             elif msg["type"] == "video":
                                 st.video(io.BytesIO(media_bytes))
                             elif msg["type"] == "audio":
                                 st.audio(io.BytesIO(media_bytes))
-                        except Exception:
-                            st.error("Ошибка загрузки медиафайла")
+                        except Exception as e:
+                            st.error(f"Ошибка загрузки медиафайла: {e}")
                             
                     # Кнопки действий
                     act_col1, act_col2, act_col3, _ = st.columns([1, 1, 1, 15])
