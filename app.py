@@ -10,7 +10,43 @@ import uuid
 import io
 from huggingface_hub import HfApi, hf_hub_download
 
-st.set_page_config(page_title="Мессенджер", page_icon="💬", layout="wide")
+st.set_page_config(page_title="Мессенджер", page_icon=":material/forum:", layout="wide")
+
+# Подключение кастомного CSS для улучшения внешнего вида
+st.markdown("""
+<style>
+    /* Скрываем стандартное верхнее меню и футер Streamlit */
+    #MainMenu {visibility: hidden;}
+    header {visibility: hidden;}
+    footer {visibility: hidden;}
+    
+    /* Сброс лишних отступов в главном контейнере */
+    .block-container {
+        padding-top: 1rem !important;
+        padding-bottom: 1rem !important;
+        max-width: 1400px;
+    }
+    
+    /* Круглые аватарки везде */
+    [data-testid="stImage"] img {
+        border-radius: 50% !important;
+        object-fit: cover !important;
+    }
+    
+    /* Улучшение визуального стиля для чата */
+    [data-testid="stChatMessage"] {
+        padding: 0.5rem 1rem;
+        border-radius: 8px;
+    }
+    
+    /* Уменьшение отступов у кнопок действий внутри сообщений */
+    .stButton button {
+        min-height: 2rem !important;
+        padding-top: 0 !important;
+        padding-bottom: 0 !important;
+    }
+</style>
+""", unsafe_allow_html=True)
 
 db_lock = threading.Lock()
 
@@ -23,7 +59,6 @@ def get_database():
         with open(file_path, "r", encoding="utf-8") as f:
             db = json.load(f)
     except Exception as e:
-        print(f"База не найдена или ошибка загрузки ({e}). Создана новая пустая БД.")
         db = {
             "users": {},      
             "messages": {},   
@@ -31,16 +66,12 @@ def get_database():
             "sessions": {}
         }
         
-    # МИГРАЦИИ (обновление старых данных под новый формат)
-    if "sessions" not in db:
-        db["sessions"] = {}
+    if "sessions" not in db: db["sessions"] = {}
         
-    # Обновляем профили пользователей
     for u, data in db["users"].items():
-        if isinstance(data, str): # Если это старый формат (просто строка пароля)
+        if isinstance(data, str): 
             db["users"][u] = {"password": data, "bio": "", "avatar": None}
             
-    # Обновляем сообщения
     for c_id, msgs in db["messages"].items():
         for m in msgs:
             if "id" not in m:
@@ -113,49 +144,71 @@ if "logged_in" not in st.session_state:
     st.session_state.editing_msg = None
     st.session_state.last_chat_id = None
 
-# Проверка токена сессии в URL (для автоматического входа)
 if not st.session_state.logged_in:
     url_token = st.query_params.get("session")
     if url_token and url_token in db.get("sessions", {}):
         st.session_state.logged_in = True
         st.session_state.username = db["sessions"][url_token]
 
-# Очистка состояний ответа/редактирования при смене чата
 if st.session_state.current_chat_id != st.session_state.last_chat_id:
     st.session_state.replying_to = None
     st.session_state.editing_msg = None
     st.session_state.last_chat_id = st.session_state.current_chat_id
 
-@st.dialog("⚙️ Настройки профиля")
+@st.dialog("Настройки профиля")
 def profile_dialog():
     user_data = db["users"][st.session_state.username]
     new_bio = st.text_input("О себе (статус)", value=user_data.get("bio", ""))
     new_avatar = st.file_uploader("Загрузить аватарку (до 2МБ)", type=["png", "jpg", "jpeg"])
     
-    if st.button("Сохранить изменения", use_container_width=True):
+    if st.button("Сохранить изменения", type="primary", use_container_width=True):
         user_data["bio"] = new_bio
         if new_avatar:
             user_data["avatar"] = base64.b64encode(new_avatar.read()).decode('utf-8')
         save_db()
         st.rerun()
 
+@st.dialog("Создать секретную группу")
+def create_group_dialog():
+    st.markdown("Секретная группа будет доступна только по уникальному коду.")
+    new_group_name = st.text_input("Название группы")
+    if st.button("Создать", type="primary", use_container_width=True):
+        if new_group_name:
+            code = generate_group_code()
+            db["groups"][code] = {"name": new_group_name, "members": [st.session_state.username]}
+            save_db()
+            st.success(f"Группа создана! Код для приглашения: `{code}`")
+
+@st.dialog("Войти по коду")
+def join_group_dialog():
+    join_code = st.text_input("Введите 8-значный код").upper()
+    if st.button("Присоединиться", type="primary", use_container_width=True):
+        if join_code in db["groups"]:
+            if st.session_state.username not in db["groups"][join_code]["members"]:
+                db["groups"][join_code]["members"].append(st.session_state.username)
+                save_db()
+            st.success("Вы добавлены в группу!")
+            st.rerun()
+        else:
+            st.error("Группа с таким кодом не найдена.")
+
 if not st.session_state.logged_in:
-    col1, col2, col3 = st.columns([1, 1, 1])
+    st.markdown("<h1 style='text-align: center; margin-bottom: 0;'>💬 Мессенджер</h1>", unsafe_allow_html=True)
+    st.markdown("<p style='text-align: center; color: gray; margin-bottom: 2rem;'>Войдите или зарегистрируйтесь для начала общения</p>", unsafe_allow_html=True)
+    
+    col1, col2, col3 = st.columns([1, 1.2, 1])
     with col2:
-        st.title("💬 Мессенджер")
-        tab1, tab2 = st.tabs(["Вход", "Регистрация"])
+        tab1, tab2 = st.tabs(["🔑 Вход", "📝 Регистрация"])
         
         with tab1:
             l_user = st.text_input("Никнейм", key="l_user")
             l_pass = st.text_input("Пароль", type="password", key="l_pass")
-            if st.button("Войти", use_container_width=True):
+            if st.button("Войти", type="primary", use_container_width=True):
                 if l_user in db["users"] and db["users"][l_user]["password"] == make_hash(l_pass):
-                    # Создаем токен сессии и сохраняем его
                     session_token = uuid.uuid4().hex
                     db["sessions"][session_token] = l_user
                     st.query_params["session"] = session_token
                     save_db()
-                    
                     st.session_state.logged_in = True
                     st.session_state.username = l_user
                     st.rerun()
@@ -165,7 +218,7 @@ if not st.session_state.logged_in:
         with tab2:
             r_user = st.text_input("Никнейм", key="r_user")
             r_pass = st.text_input("Пароль", type="password", key="r_pass")
-            if st.button("Создать аккаунт", use_container_width=True):
+            if st.button("Создать аккаунт", type="primary", use_container_width=True):
                 if not r_user or not r_pass:
                     st.warning("Заполните все поля")
                 elif r_user in db["users"]:
@@ -181,81 +234,68 @@ else:
     user_info = db["users"][current_user]
     
     with col_menu:
-        # Отображение профиля
-        prof_col1, prof_col2 = st.columns([1, 3])
+        # Профиль пользователя
+        prof_col1, prof_col2 = st.columns([1, 3], vertical_alignment="center")
         with prof_col1:
             if user_info.get("avatar"):
                 st.image(io.BytesIO(base64.b64decode(user_info["avatar"])), use_column_width=True)
             else:
-                st.markdown("<h1>👤</h1>", unsafe_allow_html=True)
+                st.markdown("<h1 style='margin:0; padding:0; text-align:center;'>👤</h1>", unsafe_allow_html=True)
         with prof_col2:
-            st.subheader(f"{current_user}")
+            st.markdown(f"**{current_user}**")
             if user_info.get("bio"):
-                st.caption(f"_{user_info['bio']}_")
+                st.caption(f"{user_info['bio']}")
                 
-        if st.button("⚙️ Настроить профиль", use_container_width=True):
-            profile_dialog()
-            
-        if st.button("🚪 Выйти", use_container_width=True):
-            # Удаляем сессию
-            token = st.query_params.get("session")
-            if token in db["sessions"]:
-                del db["sessions"][token]
-                save_db()
-            st.query_params.clear()
-            st.session_state.logged_in = False
-            st.session_state.username = ""
-            st.session_state.current_chat_id = None
-            st.rerun()
+        act1, act2 = st.columns(2)
+        with act1:
+            if st.button("Настройки", icon=":material/settings:", use_container_width=True):
+                profile_dialog()
+        with act2:
+            if st.button("Выйти", icon=":material/logout:", use_container_width=True):
+                token = st.query_params.get("session")
+                if token in db["sessions"]:
+                    del db["sessions"][token]
+                    save_db()
+                st.query_params.clear()
+                st.session_state.logged_in = False
+                st.session_state.username = ""
+                st.session_state.current_chat_id = None
+                st.rerun()
             
         st.divider()
         
-        # Секция "Группы"
-        st.markdown("### 👥 Мои группы")
-        with st.expander("➕ Создать секретную группу"):
-            new_group_name = st.text_input("Название группы")
-            if st.button("Создать"):
-                if new_group_name:
-                    code = generate_group_code()
-                    db["groups"][code] = {"name": new_group_name, "members": [current_user]}
-                    save_db()
-                    st.success(f"Создано! Код: `{code}`")
-                
-        with st.expander("🔑 Войти по коду"):
-            join_code = st.text_input("8-значный код").upper()
-            if st.button("Присоединиться"):
-                if join_code in db["groups"]:
-                    if current_user not in db["groups"][join_code]["members"]:
-                        db["groups"][join_code]["members"].append(current_user)
-                        save_db()
-                    st.success("Вы добавлены в группу!")
-                    st.rerun()
-                else:
-                    st.error("Группа не найдена")
-
-        # Список групп
+        # Группы
+        st.markdown("#### :material/forum: Мои группы")
         has_groups = False
         for code, group_data in db["groups"].items():
             if current_user in group_data["members"]:
                 has_groups = True
-                if st.button(f"🛡 {group_data['name']}", key=f"btn_grp_{code}", use_container_width=True):
+                if st.button(f"{group_data['name']}", icon=":material/tag:", type="tertiary", use_container_width=True, key=f"btn_grp_{code}"):
                     st.session_state.current_chat_id = f"group_{code}"
                     st.session_state.current_chat_name = group_data['name']
                     st.rerun()
+        
         if not has_groups:
-            st.caption("Нет групп")
+            st.caption("Нет активных групп")
+            
+        grp_act1, grp_act2 = st.columns(2)
+        with grp_act1:
+            if st.button("Создать", icon=":material/group_add:", use_container_width=True): create_group_dialog()
+        with grp_act2:
+            if st.button("Войти", icon=":material/vpn_key:", use_container_width=True): join_group_dialog()
 
         st.divider()
 
-        # Секция "Личные сообщения"
-        st.markdown("### 💬 Пользователи")
+        # Личные сообщения
+        st.markdown("#### :material/person: Пользователи")
         other_users = [u for u in db["users"].keys() if u != current_user]
         
         if not other_users:
-            st.caption("Пока никто кроме вас не зарегистрировался.")
+            st.caption("Вы пока единственный пользователь.")
         else:
             for user in other_users:
-                if st.button(f"👤 {user}", key=f"btn_user_{user}", use_container_width=True):
+                # Используем tertiary для плоского, красивого списка
+                if st.button(f"{user}", icon=":material/account_circle:", type="tertiary", use_container_width=True, key=f"btn_user_{user}"):
                     st.session_state.current_chat_id = get_dm_id(current_user, user)
                     st.session_state.current_chat_name = user
                     st.rerun()
@@ -264,35 +304,32 @@ else:
         chat_id = st.session_state.current_chat_id
         
         if not chat_id:
-            st.info("👈 Выберите чат в меню слева или создайте группу.")
+            st.info("👈 Выберите чат в меню слева или создайте новую группу.")
         else:
             is_group = chat_id.startswith("group_")
-            header_text = f"Чат с: {st.session_state.current_chat_name}"
+            header_text = st.session_state.current_chat_name
             if is_group:
                 code = chat_id.split("_")[1]
-                header_text = f"Группа: {st.session_state.current_chat_name} (Код: `{code}`)"
-            
-            st.subheader(header_text)
+                st.subheader(f"{header_text}", help=f"Секретный код группы: {code}")
+                st.caption(f"Код для приглашения: `{code}`")
+            else:
+                st.subheader(f"Чат с {header_text}")
             
             @st.fragment(run_every="2s")
             def show_messages(c_id):
                 messages = db["messages"].get(c_id, [])
                 for msg in messages:
-                    # Подготовка аватарки
                     avatar_data = db["users"].get(msg["author"], {}).get("avatar")
-                    avatar_img = io.BytesIO(base64.b64decode(avatar_data)) if avatar_data else "👤"
+                    avatar_img = io.BytesIO(base64.b64decode(avatar_data)) if avatar_data else None
                     
                     with st.chat_message(msg["author"], avatar=avatar_img):
-                        # Если это ответ на сообщение
                         if msg.get("reply_to"):
                             parent = next((m for m in messages if m["id"] == msg["reply_to"]), None)
                             if parent:
-                                st.caption(f"↪ В ответ на **{parent['author']}**: _{parent['content'][:40]}..._")
+                                st.caption(f":material/reply: В ответ **{parent['author']}**: _{parent['content'][:40]}..._")
                         
-                        # Информация и текст
                         time_text = f"**{msg['author']}** • {msg['time']}"
-                        if msg.get("edited"):
-                            time_text += " *(изменено)*"
+                        if msg.get("edited"): time_text += " *(изменено)*"
                         st.caption(time_text)
                         
                         if msg["type"] == "text":
@@ -300,38 +337,36 @@ else:
                         elif msg["type"] == "image":
                             try:
                                 img_bytes = base64.b64decode(msg["content"])
-                                st.image(img_bytes, width=300)
+                                st.image(img_bytes, width=300, border=True)
                             except Exception:
-                                st.error("Ошибка картинки")
+                                st.error("Ошибка загрузки изображения")
                                 
-                        # Кнопки взаимодействия (Ответить, Изменить, Удалить)
-                        act_col1, act_col2, act_col3, _ = st.columns([1, 1, 1, 10])
+                        act_col1, act_col2, act_col3, _ = st.columns([1, 1, 1, 15])
                         with act_col1:
-                            st.button("↩️", key=f"r_{msg['id']}", help="Ответить", on_click=set_action, args=("reply", msg["id"]))
+                            st.button("", icon=":material/reply:", type="tertiary", help="Ответить", key=f"r_{msg['id']}", on_click=set_action, args=("reply", msg["id"]))
                         if msg["author"] == current_user:
-                            if msg["type"] == "text": # Редактируем только текст
+                            if msg["type"] == "text":
                                 with act_col2:
-                                    st.button("✏️", key=f"e_{msg['id']}", help="Редактировать", on_click=set_action, args=("edit", msg["id"]))
+                                    st.button("", icon=":material/edit:", type="tertiary", help="Редактировать", key=f"e_{msg['id']}", on_click=set_action, args=("edit", msg["id"]))
                             with act_col3:
-                                st.button("🗑", key=f"d_{msg['id']}", help="Удалить", on_click=delete_msg, args=(c_id, msg["id"]))
+                                st.button("", icon=":material/delete:", type="tertiary", help="Удалить", key=f"d_{msg['id']}", on_click=delete_msg, args=(c_id, msg["id"]))
 
             # Контейнер для сообщений
-            with st.container(height=500):
+            with st.container(height=500, border=True):
                 show_messages(chat_id)
             
             editing_id = st.session_state.editing_msg
             replying_id = st.session_state.replying_to
             
             if editing_id:
-                # Режим редактирования
                 msg_to_edit = next((m for m in db["messages"].get(chat_id, []) if m["id"] == editing_id), None)
                 if msg_to_edit:
-                    st.info("✏️ **Редактирование сообщения**")
+                    st.info(":material/edit: **Редактирование сообщения**")
                     edit_col1, edit_col2, edit_col3 = st.columns([6, 1, 1])
                     with edit_col1:
                         new_text = st.text_input("Новый текст", value=msg_to_edit["content"], label_visibility="collapsed")
                     with edit_col2:
-                        if st.button("Сохранить", use_container_width=True):
+                        if st.button("Сохранить", type="primary", use_container_width=True):
                             msg_to_edit["content"] = new_text
                             msg_to_edit["edited"] = True
                             st.session_state.editing_msg = None
@@ -342,21 +377,19 @@ else:
                             st.session_state.editing_msg = None
                             st.rerun()
             else:
-                # Режим ответа или обычный ввод
                 if replying_id:
                     parent = next((m for m in db["messages"].get(chat_id, []) if m["id"] == replying_id), None)
                     if parent:
-                        st.info(f"↩️ Ответ для **{parent['author']}**: _{parent['content'][:50]}_")
-                        if st.button("❌ Отменить ответ", key="btn_cancel_reply"):
+                        st.info(f":material/reply: Ответ для **{parent['author']}**: _{parent['content'][:50]}_")
+                        if st.button("Отменить", icon=":material/close:", key="btn_cancel_reply", type="tertiary"):
                             st.session_state.replying_to = None
                             st.rerun()
                 
-                # Стандартная форма отправки
-                inp_col1, inp_col2 = st.columns([1, 8])
+                inp_col1, inp_col2 = st.columns([1, 12], vertical_alignment="bottom")
                 with inp_col1:
-                    with st.popover("📎 Фото"):
-                        img_file = st.file_uploader("Загрузить", type=["png", "jpg", "jpeg"], label_visibility="collapsed")
-                        if img_file and st.button("Отправить фото"):
+                    with st.popover("📎", help="Прикрепить фото"):
+                        img_file = st.file_uploader("Загрузить изображение", type=["png", "jpg", "jpeg"], label_visibility="collapsed")
+                        if img_file and st.button("Отправить фото", icon=":material/send:", type="primary", use_container_width=True):
                             if chat_id not in db["messages"]: db["messages"][chat_id] = []
                             b64_img = base64.b64encode(img_file.read()).decode('utf-8')
                             db["messages"][chat_id].append({
