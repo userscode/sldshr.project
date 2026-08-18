@@ -3,13 +3,15 @@ import random
 import json
 import re
 import time
-from collections import defaultdict
+import urllib.request
+import urllib.parse
+from html.parser import HTMLParser
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
 from sklearn.pipeline import make_pipeline
 
 st.set_page_config(
-    page_title="sldshr Autonomous AI",
+    page_title="sldshr Autonomous AI Engine",
     page_icon="⚡",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -17,446 +19,379 @@ st.set_page_config(
 
 st.markdown("""
 <style>
-    .main {
-        background: linear-gradient(135deg, #090d16 0%, #02040a 100%);
+    .stApp {
+        background: linear-gradient(135deg, #0a0e17 0%, #030712 100%);
+        color: #f3f4f6;
     }
-    .stAppHeader {
-        background: transparent;
+    .sldshr-header {
+        background: rgba(30, 41, 59, 0.5);
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        padding: 16px 20px;
+        border-radius: 12px;
+        margin-bottom: 20px;
+        backdrop-filter: blur(10px);
     }
     .sldshr-badge {
         background: linear-gradient(90deg, #6366f1, #a855f7, #ec4899);
         color: white;
-        padding: 5px 14px;
+        padding: 4px 12px;
         border-radius: 20px;
-        font-weight: bold;
-        font-size: 0.85rem;
+        font-weight: 600;
+        font-size: 0.8rem;
         display: inline-block;
-        margin-bottom: 12px;
-        box-shadow: 0 0 15px rgba(168, 85, 247, 0.4);
     }
-    .sldshr-status {
-        background: rgba(16, 185, 129, 0.15);
-        border: 1px solid rgba(16, 185, 129, 0.4);
-        color: #34d399;
-        padding: 8px 12px;
+    .search-source-card {
+        background: rgba(15, 23, 42, 0.8);
+        border: 1px solid rgba(99, 102, 241, 0.3);
         border-radius: 8px;
+        padding: 10px;
+        margin-top: 8px;
         font-size: 0.85rem;
-        margin-bottom: 15px;
     }
     .stChatMessage {
         border-radius: 12px;
-        padding: 12px;
-        margin-bottom: 8px;
+        border: 1px solid rgba(255, 255, 255, 0.05);
     }
     div[data-testid="stSidebar"] {
-        background: #060911;
+        background: #030712;
         border-right: 1px solid rgba(255, 255, 255, 0.08);
     }
 </style>
 """, unsafe_allow_html=True)
 
-SLDSHR_MASSIVE_INTENTS = [
-    # --- БРЕНД И ПРОЕКТЫ SLDSHR ---
+class HTMLTextExtractor(HTMLParser):
+    """Извлекает чистый текст из HTML-страниц для внешнего веб-серча."""
+    def __init__(self):
+        super().__init__()
+        self.result = []
+        self.skip_tags = {'script', 'style', 'header', 'footer', 'nav', 'noscript'}
+        self.current_tag = None
+
+    def handle_starttag(self, tag, attrs):
+        self.current_tag = tag.lower()
+
+    def handle_endtag(self, tag):
+        self.current_tag = None
+
+    def handle_data(self, data):
+        if self.current_tag not in self.skip_tags:
+            cleaned = data.strip()
+            if len(cleaned) > 20:
+                self.result.append(cleaned)
+
+    def get_text(self):
+        return " ".join(self.result[:15])
+
+class WebSearchEngine:
+    """Локальный поисковый модуль, умеющий скрапить DuckDuckGo и внешние ресурсы без ключей."""
+    @staticmethod
+    def search_duckduckgo(query, max_results=3):
+        try:
+            encoded_query = urllib.parse.quote_plus(query)
+            url = f"https://html.duckduckgo.com/html/?q={encoded_query}"
+            headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+            
+            req = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(req, timeout=5) as response:
+                html = response.read().decode('utf-8')
+
+            # Парсинг результатов
+            results = []
+            links = re.findall(r'<a class="result__url" href="([^"]+)".*?>\s*(.*?)\s*</a>', html)
+            snippets = re.findall(r'<a class="result__snippet[^"]*"[^>]*>(.*?)</a>', html, re.DOTALL)
+
+            for i in range(min(len(links), max_results)):
+                raw_url, title = links[i]
+                # Декодирование редиректов DuckDuckGo
+                clean_url = urllib.parse.unquote(raw_url.split('uddg=')[-1].split('&')[0]) if 'uddg=' in raw_url else raw_url
+                snippet_text = re.sub(r'<[^>]+>', '', snippets[i]) if i < len(snippets) else "Описание недоступно"
+                results.append({
+                    "title": re.sub(r'<[^>]+>', '', title).strip(),
+                    "url": clean_url,
+                    "snippet": snippet_text.strip()
+                })
+            return results
+        except Exception as e:
+            return [{"title": "Ошибка поиска", "url": "", "snippet": f"Не удалось выполнить поиск: {str(e)}"}]
+
+    @staticmethod
+    def fetch_web_page_content(url):
+        """Заходит на указанный веб-ресурс и извлекает полезный текст."""
+        try:
+            headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+            req = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(req, timeout=6) as response:
+                html = response.read().decode('utf-8', errors='ignore')
+            
+            parser = HTMLTextExtractor()
+            parser.feed(html)
+            text = parser.get_text()
+            return text[:1500] if text else "Не удалось извлечь содержимое страницы."
+        except Exception as e:
+            return f"Ошибка при просмотре ресурса: {str(e)}"
+
+EXPANDED_SLDSHR_DATASET = [
+    # --- СОЗДАТЕЛЬ И ПРОЕКТ SLDSHR ---
     {
-        "tag": "sldshr_about",
+        "tag": "creator_identity",
         "patterns": [
-            "кто такой sldshr", "что за sldshr", "расскажи про sldshr", "кто твой создатель", 
-            "чей ты бот", "кто сделал тебя", "sldshr это кто", "о проекте sldshr", "разработчик sldshr"
+            "кто тебя создал", "чей ты бот", "кто твой создатель", "кто сделала тебя",
+            "разработчик sldshr", "кто такой sldshr", "расскажи про sldshr", "о проекте sldshr"
         ],
         "responses": [
-            "⚡ **sldshr** — это автономная экосистема разработчиков и исследователей ИИ, создающая локальные алгоритмы, высоконагруженные сервисы и гибкие нейросетевые инструменты!",
-            "Я — полностью автономный интеллектуальный бот от **sldshr**. Работаю 100% локально, без внешних API, серверов или платных подписок!",
-            "**sldshr** продвигает идею независимых ИИ-систем. Мой код выполняется прямо в вашей среде Python с использованием машинного обучения и цепей Маркова."
-        ]
-    },
-    {
-        "tag": "sldshr_products",
-        "patterns": [
-            "что умеет sldshr", "проекты sldshr", "продукты sldshr", "стек sldshr", "какие сервисы есть у sldshr", "чем занимается sldshr"
-        ],
-        "responses": [
-            "🚀 **Ключевые направления sldshr:**\n- Локальные автономизированные ИИ-ассистенты\n- Высокоскоростные парсеры и пайплайны обработки данных\n- Модульные интерфейсы на Streamlit, React и FastAPI\n- Оптимизированные алгоритмы машинного обучения (scikit-learn, PyTorch)",
-            "Стек **sldshr** основывается на чистом Python, оптимизированных структурах данных, векторах TF-IDF и стохастической генерации текстов."
+            "⚡ Я автономный ИИ-ассистент, созданный экосистемой **sldshr**!\n\n**О проекте sldshr:**\n- 🚀 **Миссия**: Создание независимых, высокопроизводительных ИИ-инструментов, локальных алгоритмов и веб-сервисов.\n- 🛠️ **Технологии**: Python, ML (scikit-learn, PyTorch), FastAPI, Streamlit, React.\n- 🔒 **Принцип**: Безопасность данных и работа без сторонних API.",
+            "Привет! Мой создатель — разработчик под ником **sldshr**. Проект ориентирован на разработку умных локальных алгоритмов, машинного обучения и асинхронных систем."
         ]
     },
 
-    # --- ПРИВЕТСТВИЯ И ПРОЩАНИЯ ---
+    # --- СКАЗКИ И ТВОРЧЕСТВО ---
     {
-        "tag": "greeting",
+        "tag": "fairytale_generator",
         "patterns": [
-            "привет", "здравствуй", "добрый день", "хай", "салют", "доброе утро", "добрый вечер", 
-            "дратути", "хей", "ку", "приветик", "здарова", "hello", "hi", "hey", "добрейший вечерок"
+            "напиши сказку", "расскажи сказку", "придумай сказку", "сказка про", "сочини историю",
+            "расскажи историю", "хочу сказку", "сказка для детей", "приключение"
         ],
         "responses": [
-            "Приветствую! На связи локальный движок **sldshr AI**. Задавайте любой вопрос!",
-            "Здравствуйте! Я готов к обработке запросов и генерации ответов. Чем могу помочь?",
-            "Хэй! sldshr Bot на месте. Все вычисления происходят прямо у вас на ПК. О чем поговорим?",
-            "Привет! Готов разобрать вопросы по коду, науке или архитектуре приложений."
-        ]
-    },
-    {
-        "tag": "goodbye",
-        "patterns": [
-            "пока", "до свидания", "прощай", "до встречи", "увидимся", "бай", "всего доброго", 
-            "хорошего дня", "спокойной ночи", "бб", "bye", "goodbye"
-        ],
-        "responses": [
-            "До связи! Рад был помочь. Возвращайтесь к **sldshr AI** в любое время!",
-            "Всего хорошего! Успешной разработки и чистых алгоритмов!",
-            "Увидимся! Локальный движок переходит в режим ожидания."
+            "📖 **Сказка о Кристальном Агоритме и Кибер-Лесе**\n\nДавным-давно в цифровой стране *Силиконии* жил-был маленький автономный Алгоритм по имени **Коди**. В отличие от больших серверов, Коди жил прямо в карманном устройстве и мечтал научиться понимать человеческие мечты.\n\nОднажды в Кибер-Лесу погасла Главная Векторная Звезда, и все программы заблудились. Коди не растерялся: он собрал чистые данные из добрых поступков, связал их надежными цепями логики и зажег новый яркий свет!\n\nС тех пор все программы знали: не важен размер сервера, если твой код написан с душой и смыслом. ✨",
+            "🏰 **Сказка о Старом Пионе и Умном Боте**\n\nВ глубокой древней библиотеке стоял древний сервер. Он умел хранить миллионы книг, но не умел ни с кем общаться. Однажды к нему подключили юного бота sldshr.\n\nБот прочитал все книги за секунду и спросил у сервера: *«А какая книга твоя любимая?»*. Сервер задумался — впервые за сто лет его спросили об этом. Он выбрал сборник сказок о звёздах. С тех пор каждый вечер они вместе создавали новые удивительные истории для путешественников!"
         ]
     },
 
-    # --- ПРОГРАММИРОВАНИЕ И PYTHON ---
+    # --- ПРОГРАММИРОВАНИЕ И КОД ---
     {
-        "tag": "python_basics",
+        "tag": "python_guides",
         "patterns": [
-            "почему python", "зачем нужен python", "расскажи про python", "питон код", "что такое python", "плюсы python", "учить python"
+            "напиши код на python", "как выучить python", "пример кода python", "python основы",
+            "что сделать на python", "функция на python", "быстрый старт python"
         ],
         "responses": [
-            "🐍 **Python** — сильный и читаемый язык. Он доминирует в сфере ИИ и ML благодаря богатой экосистеме: `scikit-learn`, `numpy`, `pandas`, `torch`, `streamlit`.",
-            "Главное преимущество Python — лаконичный синтаксис и быстрая скорость разработки прототипов. В **sldshr** этот язык является основным инструментарием."
-        ]
-    },
-    {
-        "tag": "machine_learning",
-        "patterns": [
-            "что такое машинное обучение", "как работает ml", "объясни машинное обучение", "обучение моделей", "scikit-learn", "tf-idf", "векторизация"
-        ],
-        "responses": [
-            "🤖 **Машинное обучение (ML)** — область ИИ, где алгоритм находит паттерны в данных. Например, **TF-IDF** превращает слова в математические векторы, а **Логистическая регрессия** классифицирует их по темам.",
-            "В отличие от правил с `if/else`, модель ML в **sldshr AI** рассчитывает вероятности принадлежности вашего текста к конкретным интентам."
-        ]
-    },
-    {
-        "tag": "streamlit_info",
-        "patterns": [
-            "что такое streamlit", "зачем нужен streamlit", "как работает streamlit", "как делать дашборд на streamlit"
-        ],
-        "responses": [
-            "🎈 **Streamlit** — реактивный фреймворк Python для быстрого создания веб-приложений. Весь этот чат-бот полностью построен на Streamlit всего в одном файле!",
-            "В Streamlit состояние сохраняется через `st.session_state`, а интерфейс обновляется при любом действии пользователя за доли секунды."
+            "🐍 **Простой и чистый пример Python от sldshr:**\n\n```python\n# Пример функции обработки данных\ndef process_user_query(text: str) -> dict:\n    cleaned = text.strip().lower()\n    words = cleaned.split()\n    return {\n        'original': text,\n        'word_count': len(words),\n        'keywords': [w for w in words if len(w) > 3]\n    }\n\nresult = process_user_query('Привет от sldshr AI!')\nprint(result)\n```\n\n💡 **Совет:** Начните изучение с базовых типов данных (`dict`, `list`), затем переходите к библиотекам `pandas`, `requests` и `scikit-learn`!"
         ]
     },
 
-    # --- АРХИТЕКТУРА И ДАТА БАЗЫ ---
+    # --- НАУКА И ИСКУССТВЕННЫЙ ИНТЕЛЛЕКТ ---
     {
-        "tag": "backend_dev",
+        "tag": "ai_machine_learning",
         "patterns": [
-            "что такое backend", "как устроена архитектура", "fastapi или flask", "база данных", "sql или nosql", "docker контейнеры"
+            "как работает ии", "что такое машинное обучение", "как обучить модель", "объясни tf-idf",
+            "что такое логистическая регрессия", "как работают нейросети"
         ],
         "responses": [
-            "⚙️ **Бэкенд архитектура**: для высокой производительности выбирают **FastAPI** (асинхронность на asyncio). Для хранения данных — **PostgreSQL** (реляционная) или **Redis** (кэш в памяти).",
-            "🐳 **Docker** позволяет запаковать код, зависимости и библиотеки в изолированный образ, гарантируя, что приложение запустится везде одинаково."
+            "🧠 **Как работает классификация в этом боте:**\n\n1. **TF-IDF (Term Frequency-Inverse Document Frequency)**: Переводит ваши слова в математические векторы, определяя важность каждого слова.\n2. **Логистическая регрессия**: Находит вероятности совпадения вашего вектора с сохраненными темами в базе данных.\n3. **Выбор ответа**: Модель выбирает наиболее вероятный класс и выдает точный, понятный ответ без «галлюцинаций»!"
         ]
     },
 
-    # --- ЮМОР И СТАТУС ---
+    # --- ПРИВЕТСТВИЯ И ОБЩЕНИЕ ---
     {
-        "tag": "jokes",
+        "tag": "greetings",
         "patterns": [
-            "расскажи анекдот", "пошути", "знаешь шутку", "анекдот про программистов", "смешная шутка", "развлеки меня"
+            "привет", "здравствуй", "добрый день", "хай", "салют", "доброе утро", "добрый вечер",
+            "ку", "здарова", "hello", "hi", "как дела", "как настроение"
         ],
         "responses": [
-            "💡 Почему программисты любят тёмную тему? Потому что свет привлекает баги! 🐛",
-            "🖥️ Есть 10 типов людей: те, кто понимают двоичную систему счисления, и те, кто её не понимают.",
-            "⚡ В локальном коде sldshr нет багов, есть только незадокументированные алгоритмические особенности!"
+            "⚡ Приветствую! Я на связи. Чем могу помочь? Могу ответить на вопрос, написать сказку, показать код или найти информацию в сети!",
+            "Здравствуйте! **sldshr AI** готов к работе. Напишите ваш вопрос или выберите команду ниже."
         ]
     },
+
+    # --- СПРАВКА И ПОМОЩЬ ---
     {
-        "tag": "mood_status",
+        "tag": "help_capabilities",
         "patterns": [
-            "как дела", "как жизнь", "как настроение", "ты как", "все хорошо", "как себя чувствуешь"
+            "что ты умеешь", "помощь", "команды", "как с тобой работать", "возможности бота", "что спросить"
         ],
         "responses": [
-            "⚡ Все локальные потоки **sldshr AI** работают на максимум! Память чиста, процессоры готовы к вычислениям.",
-            "Отлично! Локальная цепь Маркова обучена, классификатор готов. О чем спросите?"
+            "🛠️ **Мои возможности:**\n\n1. 💬 **Ответы на вопросы**: Программирование, ИИ, наука, технологии.\n2. 📖 **Творчество**: Сочинение сказок, историй, примеров кода.\n3. 🌐 **Веб-поиск и скрапинг**: Могу искать свежую информацию в интернете и анализировать веб-страницы.\n4. 💾 **Управление базой знаний**: Вы можете добавлять новые ответы через боковое меню!"
         ]
     }
 ]
 
-SLDSHR_TEXT_CORPUS = """
-Проект sldshr разрабатывает автономные интеллектуальные системы на языке Python.
-Машинное обучение позволяет компьютерам учиться на данных без явного программирования всех правил.
-Векторизация TF-IDF извлекает важные слова и переводит текст в числовую матрицу.
-Логистическая регрессия рассчитывает вероятность классов и выбирает наиболее подходящий ответ.
-Цепи Маркова строят вероятностные цепочки слов для генерации новых уникальных предложений.
-Streamlit позволяет создавать современные интерактивные веб-интерфейсы прямо из кода Python.
-Локальные ИИ системы гарантируют полную приватность данные не передаются на сторонние серверы.
-Разработка бэкенда требует понимания асинхронности баз данных и контейнеризации через Docker.
-Чистый код и правильно подобранная структура данных делают приложения sldshr быстрыми и надежными.
-Векторный анализ текста позволяет находить скрытые зависимости и смысловые сходства в фразах.
-Автономный чат бот sldshr способен синтезировать ответы объединяя статистику и правила языка.
-Команда sldshr постоянно улучшает алгоритмы обработки естественного языка для локального запуска.
-Обучение модели происходит за доли секунды благодаря эффективным математическим библиотекам.
-Применение алгоритмов классификации делает поиск ответов точным и устойчивым к опечаткам.
-"""
-
-class SldshrMarkovGenerator:
-    """
-    Собственный локальный генератор текста на основе N-gram Цепи Маркова.
-    Обучается на встроенном текстовом корпусе sldshr без внешних API.
-    """
-    def __init__(self, n=2):
-        self.n = n
-        self.chain = defaultdict(list)
-        self.words = []
-
-    def fit(self, text_corpus):
-        """Обучение цепи Маркова на тексте."""
-        # Очистка и разбиение текста на слова
-        cleaned = re.sub(r'[^\w\s]', '', text_corpus.lower())
-        self.words = [w for w in cleaned.split() if w]
-        
-        if len(self.words) <= self.n:
-            return
-
-        for i in range(len(self.words) - self.n):
-            gram = tuple(self.words[i:i + self.n])
-            next_word = self.words[i + self.n]
-            self.chain[gram].append(next_word)
-
-    def generate(self, seed_words=None, max_length=25):
-        """Генерация нового уникального предложения."""
-        if not self.chain:
-            return "Локальная цепь Маркова еще не обучена."
-
-        # Попытка найти стартовую N-грамму из слов пользователя
-        start_gram = None
-        if seed_words:
-            seed_clean = [w.lower() for w in seed_words if len(w) > 2]
-            for i in range(len(seed_clean) - self.n + 1):
-                candidate = tuple(seed_clean[i:i + self.n])
-                if candidate in self.chain:
-                    start_gram = candidate
-                    break
-        
-        # Если совпадений нет, выбираем случайную N-грамму из обучающей выборки
-        if not start_gram:
-            start_gram = random.choice(list(self.chain.keys()))
-
-        result = list(start_gram)
-        current_gram = start_gram
-
-        for _ in range(max_length - self.n):
-            if current_gram in self.chain:
-                next_word = random.choice(self.chain[current_gram])
-                result.append(next_word)
-                current_gram = tuple(result[-self.n:])
-            else:
-                break
-
-        sentence = " ".join(result)
-        return sentence.capitalize() + "."
-
-class SldshrSynthesizer:
-    """
-    Локальный синтаксический движок sldshr.
-    Комбинирует найденный ответ интента, данные генератора Маркова и ключевые слова.
-    """
-    def __init__(self, markov_gen):
-        self.markov = markov_gen
-        self.prefixes = [
-            "⚡ **[sldshr Synthesis]**: ",
-            "🧠 **[Локальный ИИ sldshr]**: ",
-            "🔍 **[Анализ sldshr Engine]**: ",
-            "💡 **[Автономный генератор]**: "
-        ]
-        self.connectors = [
-            "\n\nДополнительно сгенерированный контекст: ",
-            "\n\nСвязанная локальная мысль: ",
-            "\n\nАлгоритмическое продолжение: "
-        ]
-
-    def synthesize(self, base_response, user_text):
-        """Синтезирует развернутый локальный ответ."""
-        words = re.findall(r'\w+', user_text)
-        # Генерируем дополнительную мысль цепью Маркова
-        markov_thought = self.markov.generate(seed_words=words, max_length=20)
-        
-        prefix = random.choice(self.prefixes)
-        connector = random.choice(self.connectors)
-        
-        return f"{prefix}{base_response}{connector}*\"{markov_thought}\"*"
-
-def train_intent_model(intents):
-    """Обучение локального классификатора интентов."""
-    X = []
-    y = []
-
-    for intent in intents:
-        for pattern in intent["patterns"]:
+def train_model(dataset):
+    """Обучает TF-IDF + LogisticRegression модель на датасете."""
+    X, y = [], []
+    for item in dataset:
+        for pattern in item["patterns"]:
             X.append(pattern.lower())
-            y.append(intent["tag"])
+            y.append(item["tag"])
 
     if not X:
         return None
 
     model = make_pipeline(
         TfidfVectorizer(ngram_range=(1, 2), analyzer='word', sublinear_tf=True),
-        LogisticRegression(C=4.0, max_iter=250)
+        LogisticRegression(C=5.0, max_iter=300)
     )
     model.fit(X, y)
     return model
 
-def get_bot_response(user_text, model, intents, markov_gen, synthesizer, mode, threshold=0.15):
-    """Диспетчер автономных ответов без внешних вызовов."""
-    user_text_clean = user_text.lower().strip()
-
-    # Режим 1: Чистая свободная генерация через цепь Маркова
-    if mode == "🎲 Чистый Марковский генератор":
-        words = re.findall(r'\w+', user_text_clean)
-        gen_text = markov_gen.generate(seed_words=words, max_length=30)
-        return f"⚡ **[sldshr Markov Chain]**:\n{gen_text}"
-
-    # Классификация намерения через ML
-    probabilities = model.predict_proba([user_text_clean])[0]
-    max_prob = max(probabilities)
-    predicted_tag = model.classes_[probabilities.argmax()]
-
-    # Если уверенность классификатора низкая
-    if max_prob < threshold:
-        words = re.findall(r'\w+', user_text_clean)
-        generated = markov_gen.generate(seed_words=words, max_length=25)
-        return (
-            f"⚡ **[sldshr AI]**: Точного ответа в базе нет, но моя локальная цепь Маркова сформулировала такую мысль:\n"
-            f"> *\"{generated}\"*\n\n"
-            f"Вы можете добавить этот вопрос в базу знаний в боковом меню!"
-        )
-
-    matched_intent = next((i for i in intents if i["tag"] == predicted_tag), None)
-    if not matched_intent:
-        return "Тема найдена, но ответы отсутствуют."
-
-    base_resp = random.choice(matched_intent["responses"])
-
-    # Режим 2: Гибридный генеративный синтез
-    if mode == "⚡ sldshr Гибридная генерация (Local ML + Markov)":
-        return synthesizer.synthesize(base_resp, user_text)
-    
-    # Режим 3: Точный ответ из базы
-    return f"⚡ {base_resp}"
-
-if "intents" not in st.session_state:
-    st.session_state.intents = SLDSHR_MASSIVE_INTENTS
-
-if "markov" not in st.session_state:
-    st.session_state.markov = SldshrMarkovGenerator(n=2)
-    # Пополняем корпус текстами из всех ответов интентов
-    full_corpus = SLDSHR_TEXT_CORPUS + "\n"
-    for intent in st.session_state.intents:
-        full_corpus += "\n".join(intent["responses"]) + "\n"
-    st.session_state.markov.fit(full_corpus)
+if "dataset" not in st.session_state:
+    st.session_state.dataset = EXPANDED_SLDSHR_DATASET
 
 if "model" not in st.session_state:
-    st.session_state.model = train_intent_model(st.session_state.intents)
-
-if "synthesizer" not in st.session_state:
-    st.session_state.synthesizer = SldshrSynthesizer(st.session_state.markov)
+    st.session_state.model = train_model(st.session_state.dataset)
 
 if "messages" not in st.session_state:
     st.session_state.messages = [
-        {"role": "assistant", "content": "⚡ Привет! Я **100% автономный sldshr AI Bot**. Я работаю полностью локально на алгоритмах Machine Learning и N-gram Цепях Маркова. Никаких внешних API или ключей!"}
+        {"role": "assistant", "content": "⚡ Привет! Я **sldshr Autonomous Assistant**. Задавайте вопросы, просите написать сказку или включите поиск в Интернете!"}
     ]
 
 with st.sidebar:
-    st.markdown("<div class='sldshr-badge'>sldshr Standalone Core v3.0</div>", unsafe_allow_html=True)
-    st.markdown("<div class='sldshr-status'>🟢 Режим: 100% Offline / Local</div>", unsafe_allow_html=True)
+    st.markdown("<div class='sldshr-badge'>sldshr Engine v4.0</div>", unsafe_allow_html=True)
+    st.title("⚙️ Панель Управления")
+
+    web_search_enabled = st.checkbox("🌐 Разрешить Веб-поиск (DuckDuckGo)", value=True, help="Если бот не найдет ответ в базе, он самостоятельно выйдет в интернет.")
     
-    st.title("⚙️ Настройки и Движок")
-
-    generation_mode = st.radio(
-        "Локальный режим работы:",
-        [
-            "⚡ sldshr Гибридная генерация (Local ML + Markov)",
-            "🎯 Точный классификатор (Из базы знаний)",
-            "🎲 Чистый Марковский генератор"
-        ],
-        index=0
-    )
-
     st.markdown("---")
-    st.subheader("📊 База знаний и Марков")
+    st.subheader("📊 База знаний")
     
-    total_intents = len(st.session_state.intents)
-    total_patterns = sum(len(i["patterns"]) for i in st.session_state.intents)
-    total_responses = sum(len(i["responses"]) for i in st.session_state.intents)
-    markov_states = len(st.session_state.markov.chain)
-
+    total_tags = len(st.session_state.dataset)
+    total_patterns = sum(len(i["patterns"]) for i in st.session_state.dataset)
+    
     col1, col2 = st.columns(2)
-    col1.metric("Интентов", total_intents)
-    col2.metric("Фраз / Ответов", f"{total_patterns} / {total_responses}")
-    st.metric("Состояний цепи Маркова", markov_states)
+    col1.metric("Категорий", total_tags)
+    col2.metric("Фраз в базе", total_patterns)
 
     st.markdown("---")
-    st.subheader("💾 Управление датасетом")
-    
-    dataset_json = json.dumps(st.session_state.intents, ensure_ascii=False, indent=2)
-    st.download_button(
-        label="📥 Скачать базу знаний JSON",
-        data=dataset_json,
-        file_name="sldshr_local_dataset.json",
-        mime="application/json"
-    )
-
-    # Добавление нового интента
-    with st.expander("➕ Добавить новое намерение"):
-        new_tag = st.text_input("Тег (название темы)", placeholder="например: algorithms")
-        new_patterns = st.text_area("Фразы пользователя (через запятую)", placeholder="что такое сортировка, алгоритмы сортировки")
-        new_responses = st.text_area("Ответы бота (через запятую)", placeholder="Сортировка — это упорядочивание элементов...")
+    st.subheader("➕ Добавить материал")
+    with st.expander("Обучить бота новой теме"):
+        new_tag = st.text_input("Тег / Название темы", placeholder="например: history")
+        new_patterns = st.text_area("Фразы пользователя (через запятую)", placeholder="кто такой цезарь, расскажи про рим")
+        new_responses = st.text_area("Ответ бота", placeholder="Юлий Цезарь — древнеримский полководец...")
         
-        if st.button("🚀 Дообучить локальную модель"):
+        if st.button("🚀 Дообучить локально"):
             if new_tag and new_patterns and new_responses:
                 p_list = [p.strip() for p in new_patterns.split(",") if p.strip()]
-                r_list = [r.strip() for r in new_responses.split(",") if r.strip()]
-
-                st.session_state.intents.append({
+                st.session_state.dataset.append({
                     "tag": new_tag.strip(),
                     "patterns": p_list,
-                    "responses": r_list
+                    "responses": [new_responses.strip()]
                 })
-                
-                # Переобучение ML классификатора
-                st.session_state.model = train_intent_model(st.session_state.intents)
-                
-                # Обновление корпуса Маркова
-                extra_text = " ".join(r_list)
-                st.session_state.markov.fit(extra_text)
-
-                st.success(f"Тема '{new_tag}' успешно добавлена! Локальная модель переобучена.")
+                st.session_state.model = train_model(st.session_state.dataset)
+                st.success("Модель успешно дообучена!")
                 time.sleep(1)
                 st.rerun()
-            else:
-                st.error("Заполните все поля!")
 
-    with st.expander("🔍 Посмотреть текущие данные"):
-        st.json(st.session_state.intents)
+st.markdown("""
+<div class='sldshr-header'>
+    <h2 style='margin:0; padding:0;'>⚡ sldshr Autonomous AI Assistant</h2>
+    <p style='margin:4px 0 0 0; opacity:0.8; font-size:0.9rem;'>Умный ассистент с локальной ML-моделью, генерацией сказок и возможностью поиска в Интернете.</p>
+</div>
+""", unsafe_allow_html=True)
 
-st.title("⚡ sldshr Autonomous Assistant")
-st.caption("Локальный чат-бот от sldshr | Запуск с нуля на Python, scikit-learn и N-gram Markov Chain.")
+tab_chat, tab_search, tab_dataset = st.tabs(["💬 Чат с ботом", "🌐 Веб-Поисковик и Скрапер", "📚 Инспекция Базы Данных"])
 
-# Отображение диалога
-for message in st.session_state.messages:
-    avatar = "⚡" if message["role"] == "assistant" else "👤"
-    with st.chat_message(message["role"], avatar=avatar):
-        st.markdown(message["content"])
+with tab_chat:
+    # Кнопки быстрого выбора запросов
+    st.markdown("**Быстрые запросы:**")
+    q_col1, q_col2, q_col3, q_col4 = st.columns(4)
+    quick_prompt = None
+    if q_col1.button("📖 Напиши сказку"):
+        quick_prompt = "напиши сказку"
+    if q_col2.button("🐍 Код на Python"):
+        quick_prompt = "напиши код на python"
+    if q_col3.button("⚡ Кто такой sldshr?"):
+        quick_prompt = "кто такой sldshr"
+    if q_col4.button("🌐 Поищи в инете ИИ"):
+        quick_prompt = "поищи в интернете последние новости ИИ"
 
-# Ввод сообщения
-if prompt := st.chat_input("Напишите запрос sldshr AI..."):
-    st.session_state.messages.append({"role": "user", "content": prompt})
-    with st.chat_message("user", avatar="👤"):
-        st.markdown(prompt)
+    # Отображение диалога
+    for msg in st.session_state.messages:
+        avatar = "⚡" if msg["role"] == "assistant" else "👤"
+        with st.chat_message(msg["role"], avatar=avatar):
+            st.markdown(msg["content"])
+            if "search_sources" in msg:
+                for src in msg["search_sources"]:
+                    st.markdown(f"""
+                    <div class='search-source-card'>
+                        🔗 <b><a href='{src['url']}' target='_blank'>{src['title']}</a></b><br/>
+                        <span style='opacity:0.8;'>{src['snippet']}</span>
+                    </div>
+                    """, unsafe_allow_html=True)
 
-    # Генерация локального ответа без задержек API
-    bot_response = get_bot_response(
-        prompt,
-        st.session_state.model,
-        st.session_state.intents,
-        st.session_state.markov,
-        st.session_state.synthesizer,
-        generation_mode
+    # Ввод сообщения
+    user_input = st.chat_input("Спросите что-нибудь у sldshr AI...")
+    prompt = quick_prompt or user_input
+
+    if prompt:
+        st.session_state.messages.append({"role": "user", "content": prompt})
+        with st.chat_message("user", avatar="👤"):
+            st.markdown(prompt)
+
+        # Обработка ответа
+        user_clean = prompt.lower().strip()
+        
+        # Проверка: явный запрос на веб-поиск или фразы со словами "поищи", "найди в инете", "новости"
+        is_search_query = any(w in user_clean for w in ["поищи", "найди", "интернет", "инете", "гугл", "новости", "search"])
+        
+        response_text = ""
+        sources = []
+
+        if is_search_query and web_search_enabled:
+            with st.spinner("🔍 Выполняю веб-поиск и скрапинг ресурсов..."):
+                results = WebSearchEngine.search_duckduckgo(prompt)
+                if results and results[0]["url"]:
+                    sources = results
+                    summary = "\n".join([f"- **{r['title']}**: {r['snippet']}" for r in results])
+                    response_text = f"🌐 **Вот что мне удалось найти и проанализировать в сети по запросу «{prompt}»:**\n\n{summary}"
+                else:
+                    response_text = "🌐 К сожалению, по данному запросу не удалось получить результаты из сети."
+        else:
+            # Локальная классификация
+            probabilities = st.session_state.model.predict_proba([user_clean])[0]
+            max_prob = max(probabilities)
+            predicted_tag = st.session_state.model.classes_[probabilities.argmax()]
+
+            if max_prob >= 0.22:
+                matched = next((item for item in st.session_state.dataset if item["tag"] == predicted_tag), None)
+                if matched:
+                    response_text = random.choice(matched["responses"])
+            
+            # Если бот не уверен и включен веб-поиск — пробуем найти в инете
+            if not response_text:
+                if web_search_enabled:
+                    with st.spinner("🤖 В базе ответа нет. Ищу информацию в Интернете..."):
+                        results = WebSearchEngine.search_duckduckgo(prompt)
+                        if results and results[0]["url"]:
+                            sources = results
+                            summary = "\n".join([f"- **{r['title']}**: {r['snippet']}" for r in results])
+                            response_text = f"⚡ **Точного ответа в локальной базе не нашлось, но я нашел информацию в сети:**\n\n{summary}"
+                
+                if not response_text:
+                    response_text = "⚡ К сожалению, я пока не знаю ответа на этот вопрос. Вы можете добавить его в мою базу знаний через боковое меню!"
+
+        msg_data = {"role": "assistant", "content": response_text}
+        if sources:
+            msg_data["search_sources"] = sources
+
+        st.session_state.messages.append(msg_data)
+        st.rerun()
+
+with tab_search:
+    st.subheader("🌐 Модуль прямого веб-поиска и скрапинга")
+    st.caption("Здесь вы можете вручную протестировать, как бот выравнивает и извлекает контент с сайтов.")
+    
+    search_q = st.text_input("Введите поисковый запрос:", placeholder="Последние новости Python 2026")
+    if st.button("🔎 Найти и отскрапить"):
+        if search_q:
+            res = WebSearchEngine.search_duckduckgo(search_q)
+            st.write("### Результаты поиска:")
+            for item in res:
+                st.markdown(f"**[{item['title']}]({item['url']})**")
+                st.write(item['snippet'])
+                if item['url']:
+                    with st.expander(f"📄 Извлечь текст со страницы {item['url'][:40]}..."):
+                        content = WebSearchEngine.fetch_web_page_content(item['url'])
+                        st.text_area("Извлеченный текст:", content, height=200)
+                st.markdown("---")
+
+with tab_dataset:
+    st.subheader("📚 Просмотр текущей базы знаний")
+    st.json(st.session_state.dataset)
+    
+    json_bytes = json.dumps(st.session_state.dataset, ensure_ascii=False, indent=2).encode('utf-8')
+    st.download_button(
+        label="📥 Скачать базу данных (JSON)",
+        data=json_bytes,
+        file_name="sldshr_dataset.json",
+        mime="application/json"
     )
-
-    st.session_state.messages.append({"role": "assistant", "content": bot_response})
-    with st.chat_message("assistant", avatar="⚡"):
-        st.markdown(bot_response)
