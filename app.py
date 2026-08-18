@@ -1,80 +1,178 @@
-import tkinter as tk
-from tkinter import scrolledtext
-import datetime
+import streamlit as st
+import random
+import json
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.linear_model import LogisticRegression
+from sklearn.pipeline import make_pipeline
 
-class MessengerApp:
+# -----------------------------------------------------------------------------
+# 1. УЧЕБНЫЕ МАТЕРИАЛЫ (Датасет интентов / намерений)
+# -----------------------------------------------------------------------------
+DEFAULT_INTENTS = [
+    {
+        "tag": "greeting",
+        "patterns": ["привет", "здравствуй", "добрый день", "хай", "салют", "доброе утро", "добрый вечер"],
+        "responses": ["Привет! Чем могу помочь?", "Здравствуйте! Рад общению.", "Приветствую! О чем поговорим?"]
+    },
+    {
+        "tag": "goodbye",
+        "patterns": ["пока", "до свидания", "прощай", "до встречи", "увидимся", "бай"],
+        "responses": ["До свидания! Хорошего дня!", "Пока! Обращайтесь еще.", "Всего доброго!"]
+    },
+    {
+        "tag": "thanks",
+        "patterns": ["спасибо", "благодарю", "большое спасибо", "выручил", "спас"],
+        "responses": ["Пожалуйста! Рад помочь.", "Не за что!", "Всегда к вашим услугам!"]
+    },
+    {
+        "tag": "about_bot",
+        "patterns": ["кто ты", "что ты умеешь", "расскажи о себе", "как тебя зовут", "ты кто"],
+        "responses": [
+            "Я чат-бот, обученный с нуля с помощью TF-IDF и Logistic Regression!",
+            "Я локальный бот на Streamlit. Обучаюсь на текстовых шаблонах прямо здесь.",
+            "Меня создали без внешних API — моя логика работает прямо в вашем коде!"
+        ]
+    },
+    {
+        "tag": "capabilities",
+        "patterns": ["что делать", "помощь", "хелп", "как пользоваться", "инструкция"],
+        "responses": [
+            "Вы можете задавать мне вопросы, приветствовать или обучать новым фразам в боковом меню!",
+            "Напишите мне сообщение, и я попытаюсь определить ваше намерение."
+        ]
+    },
+    {
+        "tag": "mood",
+        "patterns": ["как дела", "как жизнь", "как настроение", "все хорошо"],
+        "responses": ["Отлично! Готов к обучению и ответам.", "Всё супер, спасибо за проявленный интерес!"]
+    }
+]
+
+# -----------------------------------------------------------------------------
+# 2. ФУНКЦИИ ДЛЯ ОБУЧЕНИЯ И ПРЕДСКАЗАНИЯ
+# -----------------------------------------------------------------------------
+def train_model(intents):
     """
-    Простой мессенджер на tkinter без серверной части.
-    Позволяет отправлять сообщения от имени 'Вы' и 'Собеседник'.
+    Извлекает тексты и метки из датасета и обучает
+    Пайплайн: TF-IDF Vectorizer + Logistic Regression.
     """
+    X = []
+    y = []
 
-    def __init__(self, root):
-        self.root = root
-        self.root.title("Мессенджер")
-        self.root.geometry("500x400")
+    for intent in intents:
+        for pattern in intent["patterns"]:
+            X.append(pattern.lower())
+            y.append(intent["tag"])
 
-        # --- Область отображения сообщений (только для чтения) ---
-        self.messages_area = scrolledtext.ScrolledText(
-            root,
-            state='normal',      # временно разрешаем вставку
-            height=15,
-            wrap=tk.WORD
-        )
-        self.messages_area.pack(padx=10, pady=10, fill=tk.BOTH, expand=True)
-        self.messages_area.config(state='disabled')  # запрещаем редактирование
+    if not X:
+        return None
 
-        # --- Поле ввода нового сообщения ---
-        self.entry = tk.Entry(root, width=40)
-        self.entry.pack(side=tk.LEFT, padx=(10, 0), pady=10, fill=tk.X, expand=True)
+    # Создаем конвейер из векторизатора и классификатора
+    model = make_pipeline(
+        TfidfVectorizer(ngram_range=(1, 2), analyzer='word'),
+        LogisticRegression(C=10.0, max_iter=200)
+    )
+    model.fit(X, y)
+    return model
 
-        # --- Кнопки управления ---
-        self.send_btn = tk.Button(root, text="Отправить", command=self.on_send)
-        self.send_btn.pack(side=tk.LEFT, padx=5, pady=10)
+def get_bot_response(user_text, model, intents, threshold=0.25):
+    """
+    Определяет намерение пользователя с помощью обученной модели.
+    Если уверенность ниже порога, возвращает шаблонный ответ нераспознанной фразы.
+    """
+    user_text_clean = user_text.lower().strip()
+    
+    # Предсказание вероятностей классов
+    probabilities = model.predict_proba([user_text_clean])[0]
+    max_prob = max(probabilities)
+    predicted_tag = model.classes_[probabilities.argmax()]
 
-        self.reply_btn = tk.Button(root, text="Ответить", command=self.on_reply)
-        self.reply_btn.pack(side=tk.LEFT, padx=5, pady=10)
+    if max_prob < threshold:
+        return "Извините, я пока не понял ваш вопрос. Попробуйте сформулировать иначе или добавьте эту фразу в обучающие данные!"
 
-        self.clear_btn = tk.Button(root, text="Очистить", command=self.clear_chat)
-        self.clear_btn.pack(side=tk.LEFT, padx=5, pady=10)
+    # Находим ответ для предсказанного тега
+    for intent in intents:
+        if intent["tag"] == predicted_tag:
+            return random.choice(intent["responses"])
 
-        # --- Привязка клавиши Enter к отправке ---
-        self.entry.bind('<Return>', lambda event: self.on_send())
+    return "Интересный вопрос! Но у меня нет подходящего ответа."
 
-    def add_message(self, sender: str, text: str) -> None:
-        """
-        Добавляет сообщение в чат с временной меткой и именем отправителя.
-        """
-        if not text.strip():
-            return  # игнорируем пустые сообщения
+# -----------------------------------------------------------------------------
+# 3. STREAMLIT ИНТЕРФЕЙС И СОСТОЯНИЕ
+# -----------------------------------------------------------------------------
+st.set_page_config(page_title="Чат-бот с нуля", page_icon="🤖", layout="wide")
 
-        timestamp = datetime.datetime.now().strftime("%H:%M:%S")
-        message = f"[{timestamp}] {sender}: {text}\n"
+st.title("🤖 Чат-бот на Streamlit (Обучение с нуля)")
+st.caption("Бот использует модель TF-IDF + LogisticRegression и не зависит от внешних API.")
 
-        self.messages_area.config(state='normal')
-        self.messages_area.insert(tk.END, message)
-        self.messages_area.see(tk.END)       # прокрутка вниз
-        self.messages_area.config(state='disabled')
+# Инициализация состояния
+if "intents" not in st.session_state:
+    st.session_state.intents = DEFAULT_INTENTS
 
-    def on_send(self) -> None:
-        """Отправляет сообщение от имени 'Вы'."""
-        text = self.entry.get()
-        self.add_message("Вы", text)
-        self.entry.delete(0, tk.END)
+if "model" not in st.session_state:
+    st.session_state.model = train_model(st.session_state.intents)
 
-    def on_reply(self) -> None:
-        """Отправляет сообщение от имени 'Собеседник' (имитация ответа)."""
-        text = self.entry.get()
-        self.add_message("Собеседник", text)
-        self.entry.delete(0, tk.END)
+if "messages" not in st.session_state:
+    st.session_state.messages = [
+        {"role": "assistant", "content": "Привет! Я бот, обученный с нуля. Напиши мне что-нибудь!"}
+    ]
 
-    def clear_chat(self) -> None:
-        """Очищает всю историю сообщений."""
-        self.messages_area.config(state='normal')
-        self.messages_area.delete(1.0, tk.END)
-        self.messages_area.config(state='disabled')
+# -----------------------------------------------------------------------------
+# 4. БОКОВАЯ ПАНЕЛЬ: Управление обучающими данными
+# -----------------------------------------------------------------------------
+with st.sidebar:
+    st.header("⚙️ Обучение модели")
+    st.markdown("Вы можете переобучить бота, добавив новые намерения и варианты фраз.")
 
+    with st.expander("➕ Добавить новое намерение (Intent)"):
+        new_tag = st.text_input("Тег (уникальный ID)", placeholder="например: weather")
+        new_patterns = st.text_area("Шаблоны фраз (через запятую)", placeholder="какая погода, идет ли дождь, сколько градусов")
+        new_responses = st.text_area("Ответы бота (через запятую)", placeholder="Погода отличная!, Возьмите зонт.")
+        
+        if st.button("Добавить и Переобучить"):
+            if new_tag and new_patterns and new_responses:
+                patterns_list = [p.strip() for p in new_patterns.split(",") if p.strip()]
+                responses_list = [r.strip() for r in new_responses.split(",") if r.strip()]
 
-if __name__ == "__main__":
-    root = tk.Tk()
-    app = MessengerApp(root)
-    root.mainloop()
+                # Добавляем в датасет
+                st.session_state.intents.append({
+                    "tag": new_tag.strip(),
+                    "patterns": patterns_list,
+                    "responses": responses_list
+                })
+                
+                # Переобучаем модель
+                st.session_state.model = train_model(st.session_state.intents)
+                st.success(f"Тег '{new_tag}' успешно добавлен! Модель переобучена.")
+            else:
+                st.error("Пожалуйста, заполните все поля!")
+
+    st.subheader("📚 Текущий датасет")
+    st.json(st.session_state.intents)
+
+# -----------------------------------------------------------------------------
+# 5. ДИАЛОГОВЫЙ ИНТЕРФЕЙС
+# -----------------------------------------------------------------------------
+# Отображение истории сообщений
+for message in st.session_state.messages:
+    with st.chat_message(message["role"]):
+        st.markdown(message["content"])
+
+# Поле ввода сообщения
+if prompt := st.chat_input("Напишите сообщение..."):
+    # Добавляем сообщение пользователя
+    st.session_state.messages.append({"role": "user", "content": prompt})
+    with st.chat_message("user"):
+        st.markdown(prompt)
+
+    # Генерация ответа модели
+    response = get_bot_response(
+        prompt, 
+        st.session_state.model, 
+        st.session_state.intents
+    )
+
+    # Добавляем ответ бота
+    st.session_state.messages.append({"role": "assistant", "content": response})
+    with st.chat_message("assistant"):
+        st.markdown(response)
